@@ -1,0 +1,29 @@
+const { Telegraf } = require('telegraf');
+
+const BOT_TOKEN = process.env.BOT_TOKEN || '9226631257:AAEpUSr5glRKSnfoJBNj90ubz0hIvORZCVM';
+const MY_USER_ID = '7774448780';
+
+const bot = new Telegraf(BOT_TOKEN);
+
+bot.start((ctx) => {
+  ctx.reply(`Привет! Я твой бот. Твой Telegram ID: ${ctx.from.id}`);
+});
+
+bot.on('text', (ctx) => {
+  const text = ctx.message.text;
+  const userId = ctx.from.id;
+  
+  console.log(`Получено сообщение от ${userId}: ${text}`);
+  
+  if (userId.toString() === MY_USER_ID) {
+    ctx.reply(`Ты администратор. Твой ID: ${userId}`);
+  } else {
+    ctx.reply(`Привет, ${ctx.from.first_name}! Я получил твоё сообщение.`);
+  }
+});
+
+bot.launch();
+console.log('Бот запущен...');
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));

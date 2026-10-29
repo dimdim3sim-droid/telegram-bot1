@@ -1,0 +1,148 @@
+const { Telegraf } = require('telegraf');
+const fs = require('fs');
+const path = require('path');
+
+const BOT_TOKEN = process.env.BOT_TOKEN || '9228974259:AAE5v1pBy4P4L7ksSqwAZOltDyY2AopATvY';
+const MY_USER_ID = '7774448780';
+
+const bot = new Telegraf(BOT_TOKEN);
+const usersWaitingForCaptcha = new Map();
+const START_TIME = Date.now();
+
+// Генерация математической капчи
+function generateCaptcha() {
+  const num1 = Math.floor(Math.random() * 20) + 1;
+  const num2 = Math.floor(Math.random() * 20) + 1;
+  const answer = num1 + num2;
+  return { question: `${num1} + ${num2} = ?`, answer: answer.toString() };
+}
+
+// Проверка ответа на капчу
+function checkCaptcha(userAnswer, correctAnswer) {
+  return parseInt(userAnswer) === correctAnswer;
+}
+
+// Обработчик start
+bot.start((ctx) => {
+  const userId = ctx.from.id;
+  
+  // Если администратор — пропускаем капчу
+  if (userId.toString() === MY_USER_ID) {
+    ctx.reply(`🤖 Привет! Я твой бот. Твой Telegram ID: ${userId}\n\n✅ Капча для тебя отключена. Добро пожаловать!`);
+    return;
+  }
+  
+  // Генерируем капчу для нового пользователя
+  const captcha = generateCaptcha();
+  usersWaitingForCaptcha.set(userId, { 
+    question: captcha.question, 
+    answer: captcha.answer, 
+    attempts: 0 
+  });
+  
+  ctx.reply(`🤖 Для продолжения решите капчу:\n\n${captcha.question}\n\nОтветьте числом.`);
+});
+
+// Обработчик текстовых сообщений
+bot.on('text', (ctx) => {
+  const text = ctx.message.text.trim();
+  const userId = ctx.from.id;
+  
+  // Очищаем старых пользователей (старше 1 часа)
+  const now = Date.now();
+  for (const [id, data] of usersWaitingForCaptcha.entries()) {
+    if (now - data.timestamp > 3600000) { // 1 час
+      usersWaitingForCaptcha.delete(id);
+    }
+  }
+  
+  // Проверка на администратора
+  if (userId.toString() === MY_USER_ID) {
+    console.log(`👑 Администратор: ${userId}`);
+    ctx.reply(`Ты администратор. Твой ID: ${userId}`);
+    return;
+  }
+  
+  // Проверка капчи
+  const captchaData = usersWaitingForCaptcha.get(userId);
+  if (captchaData) {
+    captchaData.timestamp = now;
+    captchaData.attempts = (captchaData.attempts || 0) + 1;
+    
+    if (checkCaptcha(text, captchaData.answer)) {
+      usersWaitingForCaptcha.delete(userId);
+      ctx.reply(`✅ Капча пройдена! Добро пожаловать!`);
+      console.log(`✅ Капча пройдена: ${userId}`);
+    } else {
+      const maxAttempts = 3;
+      if (captchaData.attempts >= maxAttempts) {
+        usersWaitingForCaptcha.delete(userId);
+        ctx.reply(`❌ Слишком много попыток! Капча пропущена. Попробуйте позже.`);
+        console.log(`❌ Слишком много попыток: ${userId}`);
+      } else {
+        ctx.reply(`❌ Неправильно! Попробуйте снова (${maxAttempts - captchaData.attempts} попытки осталось)`);
+      }
+    }
+    return;
+  }
+  
+  console.log(`💬 Сообщение от ${userId}: ${text}`);
+  ctx.reply(`Привет, ${ctx.from.first_name}! Я получил твоё сообщение.`);
+});
+
+// Обработчик /restart
+bot.command('restart', (ctx) => {
+  if (ctx.from.id.toString() === MY_USER_ID) {
+    ctx.reply('Перезагрузка...');
+    setTimeout(() => {
+      require('child_process').exec(`pkill -f "node bot.js"`, (err) => {
+        if (!err) {
+          console.log('⚠️ Бот перезапущен');
+        }
+      });
+    }, 2000);
+  } else {
+    ctx.reply('Только администратор может перезапускать бота!');
+  }
+});
+
+// Обработчик /status
+bot.command('status', (ctx) => {
+  if (ctx.from.id.toString() === MY_USER_ID) {
+    const size = usersWaitingForCaptcha.size;
+    const uptime = ((Date.now() - START_TIME) / 1000).toFixed(0);
+    ctx.reply(`📊 Статус бота:\n✅ Работает\n⏱️ Время работы: ${uptime} сек\n🧩 Активных капч: ${size}`);
+  } else {
+    ctx.reply('Только администратор может смотреть статус!');
+  }
+});
+
+// Запуск бота
+bot.launch({
+  polling: true,
+  timeout: 30000,
+  reconnectDelay: 5000
+});
+
+console.log(`🚀 Бот запущен... Token: ${BOT_TOKEN.substring(0, 10)}...`);
+
+// Обработчик сигналов для перезапуска
+process.once('SIGINT', () => {
+  console.log('⚠️ Получен SIGINT');
+  bot.stop('SIGINT');
+});
+
+process.once('SIGTERM', () => {
+  console.log('⚠️ Получен SIGTERM');
+  bot.stop('SIGTERM');
+});
+
+// Логирование ошибок
+bot.on('error', (err) => {
+  console.error(`❌ Ошибка бота: ${err.message}`);
+});
+
+// Автоматический перезапуск при завершении
+process.on('exit', (code) => {
+  console.log(`⚠️ Процесс завершён с кодом: ${code}`);
+});
