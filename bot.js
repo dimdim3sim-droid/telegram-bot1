@@ -7,61 +7,75 @@ const MAIN_ADMIN = '7774448780';
 const COMMISSION = 0.05;
 const DATA_FILE = path.join(__dirname, 'data.json');
 const HELPER_LINK = 'https://t.me/helperxaze';
+const FISH_COOLDOWN = 12 * 60 * 60 * 1000;
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// ---- Persistent stores ----
 const orders = new Map();
 let nextOrderId = 1;
 const userState = new Map();
-const userStars = new Map(); // real paid stars
-const userCoins = new Map(); // game currency from tasks
-const userLang = new Map(); // 'ru' | 'en'
-const ownedTitles = new Map(); // uid -> Set of title ids
-const activeTitle = new Map(); // uid -> title id
+const userStars = new Map();
+const userCoins = new Map();
+const userLang = new Map();
+const ownedTitles = new Map();
+const activeTitle = new Map();
 const agreed = new Set();
 const banned = new Set();
 const restricted = new Set();
 const admins = new Set([MAIN_ADMIN]);
 const transactions = [];
 const users = new Set();
-const referrals = new Map(); // inviter -> Set of invited uids
-const invitedBy = new Map(); // uid -> inviter
-const referralCount = new Map(); // inviter -> count
+const referrals = new Map();
+const invitedBy = new Map();
+const referralCount = new Map();
 
-// ---- New features data ----
-const userFish = new Map(); // uid -> array of fish objects
-const userInventory = new Map(); // uid -> array of items
-const mail = new Map(); // uid -> array of messages
-const news = []; // array of news objects
-const videos = new Map(); // id -> video object
+const userFish = new Map();
+const userInventory = new Map();
+const mail = new Map();
+const news = [];
+const videos = new Map();
 let nextVideoId = 1;
-const auction = new Map(); // id -> auction item
+const auction = new Map();
 let nextAuctionId = 1;
-const userProfiles = new Map(); // uid -> profile data
-const fishingCooldown = new Map(); // uid -> last fish timestamp
-const userTitles = new Map(); // already have ownedTitles
+const userProfiles = new Map();
+const fishingCooldown = new Map();
+const userTasksClaimed = new Map();
+const userInvested = new Map();
+const userCompletedOrders = new Map();
 
 const FISH = [
   { name: 'Карась', rarity: 'common', emoji: '🐟', value: 1 },
   { name: 'Окунь', rarity: 'common', emoji: '🐟', value: 1 },
   { name: 'Плотва', rarity: 'common', emoji: '🐟', value: 1 },
   { name: 'Лещ', rarity: 'common', emoji: '🐟', value: 2 },
+  { name: 'Уклейка', rarity: 'common', emoji: '🐟', value: 1 },
+  { name: 'Ёрш', rarity: 'common', emoji: '🐟', value: 1 },
+  { name: 'Краснопёрка', rarity: 'common', emoji: '🐟', value: 2 },
   { name: 'Щука', rarity: 'uncommon', emoji: '🐠', value: 3 },
   { name: 'Судак', rarity: 'uncommon', emoji: '🐠', value: 3 },
   { name: 'Сом', rarity: 'uncommon', emoji: '🐠', value: 4 },
+  { name: 'Жерех', rarity: 'uncommon', emoji: '🐠', value: 4 },
+  { name: 'Голавль', rarity: 'uncommon', emoji: '🐠', value: 3 },
   { name: 'Форель', rarity: 'rare', emoji: '🐡', value: 5 },
   { name: 'Лосось', rarity: 'rare', emoji: '🐡', value: 6 },
   { name: 'Осетр', rarity: 'rare', emoji: '🐡', value: 7 },
+  { name: 'Хариус', rarity: 'rare', emoji: '🐡', value: 6 },
+  { name: 'Таймень', rarity: 'rare', emoji: '🐡', value: 8 },
   { name: 'Тунец', rarity: 'epic', emoji: '🐋', value: 10 },
   { name: 'Акула', rarity: 'epic', emoji: '🦈', value: 12 },
   { name: 'Кит', rarity: 'epic', emoji: '🐋', value: 15 },
+  { name: 'Марлин', rarity: 'epic', emoji: '🐋', value: 14 },
+  { name: 'Рыба-меч', rarity: 'epic', emoji: '🐋', value: 13 },
   { name: 'Золотая рыбка', rarity: 'legendary', emoji: '✨', value: 25 },
   { name: 'Дракон-рыба', rarity: 'legendary', emoji: '🐉', value: 30 },
+  { name: 'Рыба-феникс', rarity: 'legendary', emoji: '🔥', value: 35 },
+  { name: 'Кристальная рыба', rarity: 'legendary', emoji: '💎', value: 40 },
   { name: 'Левиафан', rarity: 'mythic', emoji: '⚡', value: 50 },
+  { name: 'Кракен', rarity: 'mythic', emoji: '🐙', value: 60 },
   { name: 'Божественная рыба', rarity: 'divine', emoji: '👼', value: 100 },
+  { name: 'Рыба-звезда', rarity: 'divine', emoji: '⭐', value: 120 },
+  { name: 'Рыба-галактика', rarity: 'divine', emoji: '🌌', value: 150 },
 ];
-
 const RARITY_WEIGHTS = { common: 40, uncommon: 25, rare: 15, epic: 10, legendary: 7, mythic: 2, divine: 1 };
 
 function rollFish() {
@@ -73,7 +87,7 @@ function rollFish() {
     if (r <= 0) { rarity = k; break; }
   }
   const pool = FISH.filter(f => f.rarity === rarity);
-  return pool[Math.floor(Math.random() * pool.length)];
+  return { ...pool[Math.floor(Math.random() * pool.length)], caughtAt: Date.now() };
 }
 
 const TITLES = [
@@ -84,147 +98,18 @@ const TITLES = [
 ];
 
 const TASKS = [
-  { id: 'invite', name: 'Пригласи друга', reward: 1, en: 'Invite a friend' },
+  { id: 'invite1', ru: 'Пригласи 1 друга', en: 'Invite 1 friend', reward: 1, check: uid => (referralCount.get(String(uid)) || 0) >= 1 },
+  { id: 'invite5', ru: 'Пригласи 5 друзей', en: 'Invite 5 friends', reward: 5, check: uid => (referralCount.get(String(uid)) || 0) >= 5 },
+  { id: 'invite10', ru: 'Пригласи 10 друзей', en: 'Invite 10 friends', reward: 15, check: uid => (referralCount.get(String(uid)) || 0) >= 10 },
+  { id: 'orders3', ru: 'Выполни 3 заказа', en: 'Complete 3 orders', reward: 5, check: uid => (userCompletedOrders.get(String(uid)) || 0) >= 3 },
+  { id: 'title1', ru: 'Купи любой титул', en: 'Buy any title', reward: 3, check: uid => (ownedTitles.get(String(uid)) || new Set()).size >= 1 },
+  { id: 'invest10', ru: 'Инвестируй 10 монет в видео', en: 'Invest 10 coins in videos', reward: 2, check: uid => (userInvested.get(String(uid)) || 0) >= 10 },
 ];
 
-function loadState() {
-  try {
-    if (!fs.existsSync(DATA_FILE)) return;
-    const d = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    nextOrderId = d.nextOrderId || 1;
-    orders.clear();
-    (d.orders || []).forEach(([id, o]) => orders.set(id, o));
-    userStars.clear();
-    (d.userStars || []).forEach(([uid, n]) => userStars.set(uid, n));
-    userCoins.clear();
-    (d.userCoins || []).forEach(([uid, n]) => userCoins.set(uid, n));
-    userLang.clear();
-    (d.userLang || []).forEach(([uid, l]) => userLang.set(uid, l));
-    ownedTitles.clear();
-    (d.ownedTitles || []).forEach(([uid, arr]) => ownedTitles.set(uid, new Set(arr)));
-    activeTitle.clear();
-    (d.activeTitle || []).forEach(([uid, t]) => activeTitle.set(uid, t));
-    agreed.clear(); (d.agreed || []).forEach(x => agreed.add(String(x)));
-    banned.clear(); (d.banned || []).forEach(x => banned.add(String(x)));
-    restricted.clear(); (d.restricted || []).forEach(x => restricted.add(String(x)));
-    admins.clear(); (d.admins || [MAIN_ADMIN]).forEach(x => admins.add(String(x)));
-    users.clear(); (d.users || []).forEach(x => users.add(String(x)));
-    transactions.length = 0; (d.transactions || []).forEach(t => transactions.push(t));
-    referrals.clear();
-    (d.referrals || []).forEach(([inv, arr]) => referrals.set(inv, new Set(arr)));
-    invitedBy.clear();
-    (d.invitedBy || []).forEach(([u, inv]) => invitedBy.set(u, inv));
-    referralCount.clear();
-    (d.referralCount || []).forEach(([inv, n]) => referralCount.set(inv, n));
-    userFish.clear();
-    (d.userFish || []).forEach(([uid, arr]) => userFish.set(uid, arr));
-    userInventory.clear();
-    (d.userInventory || []).forEach(([uid, arr]) => userInventory.set(uid, arr));
-    mail.clear();
-    (d.mail || []).forEach(([uid, arr]) => mail.set(uid, arr));
-    (d.news || []).forEach(n => news.push(n));
-    videos.clear();
-    (d.videos || []).forEach(([id, v]) => videos.set(id, v));
-    nextVideoId = d.nextVideoId || 1;
-    auction.clear();
-    (d.auction || []).forEach(([id, a]) => auction.set(id, a));
-    nextAuctionId = d.nextAuctionId || 1;
-    userProfiles.clear();
-    (d.userProfiles || []).forEach(([uid, p]) => userProfiles.set(uid, p));
-    fishingCooldown.clear();
-    (d.fishingCooldown || []).forEach(([uid, t]) => fishingCooldown.set(uid, t));
-  } catch (e) {
-    console.error('State load error:', e.message);
-  }
-}
-
-function saveState() {
-  try {
-    const data = {
-      nextOrderId,
-      orders: [...orders.entries()],
-      userStars: [...userStars.entries()],
-      userCoins: [...userCoins.entries()],
-      userLang: [...userLang.entries()],
-      ownedTitles: [...ownedTitles.entries()].map(([uid, set]) => [uid, [...set]]),
-      activeTitle: [...activeTitle.entries()],
-      agreed: [...agreed],
-      banned: [...banned],
-      restricted: [...restricted],
-      admins: [...admins],
-      users: [...users],
-      transactions: transactions.slice(-1000),
-      referrals: [...referrals.entries()].map(([inv, set]) => [inv, [...set]]),
-      invitedBy: [...invitedBy.entries()],
-      referralCount: [...referralCount.entries()],
-      userFish: [...userFish.entries()],
-      userInventory: [...userInventory.entries()],
-      mail: [...mail.entries()],
-      news: news.slice(-50),
-      videos: [...videos.entries()],
-      nextVideoId,
-      auction: [...auction.entries()],
-      nextAuctionId,
-      userProfiles: [...userProfiles.entries()],
-      fishingCooldown: [...fishingCooldown.entries()],
-    };
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data));
-  } catch (e) {
-    console.error('State save error:', e.message);
-  }
-}
-
-loadState();
-
-function getStars(uid) { return userStars.get(String(uid)) || 0; }
-function addStars(uid, n) { userStars.set(String(uid), getStars(uid) + n); saveState(); }
-function getCoins(uid) { return userCoins.get(String(uid)) || 0; }
-function addCoins(uid, n) { userCoins.set(String(uid), getCoins(uid) + n); saveState(); }
-function genId() { const id = nextOrderId++; saveState(); return id; }
-function isAdmin(uid) { return admins.has(String(uid)); }
-function isMainAdmin(uid) { return String(uid) === MAIN_ADMIN; }
-function isBanned(uid) { return banned.has(String(uid)); }
-function isRestricted(uid) { return restricted.has(String(uid)); }
-function getLang(uid) { return userLang.get(String(uid)) || 'ru'; }
-function setLang(uid, l) { userLang.set(String(uid), l); saveState(); }
-
 const L = {
-  ru: {
-    menu: '👋 Главное меню',
-    balance: '💰 Баланс',
-    stars: '⭐ Звёзды',
-    coins: '🪙 Монеты',
-    order: '📋 Заказать',
-    execute: '⚡ Выполнить',
-    shop: '🛒 Магазин',
-    tasks: '🎯 Задания',
-    lang: '🌐 Язык',
-    suggest: '💡 Предложить идею',
-    agreement: '📜 Соглашение',
-    topup: '💳 Пополнить',
-    admin: '👑 Админ-панель',
-    back: '⬅️ Назад',
-    choose: 'Выбирай действие:',
-  },
-  en: {
-    menu: '👋 Main Menu',
-    balance: '💰 Balance',
-    stars: '⭐ Stars',
-    coins: '🪙 Coins',
-    order: '📋 Order',
-    execute: '⚡ Execute',
-    shop: '🛒 Shop',
-    tasks: '🎯 Tasks',
-    lang: '🌐 Language',
-    suggest: '💡 Suggest idea',
-    agreement: '📜 Agreement',
-    topup: '💳 Top up',
-    admin: '👑 Admin panel',
-    back: '⬅️ Back',
-    choose: 'Choose an action:',
-  },
+  ru: { menu: '👋 Главное меню', balance: '💰 Баланс', stars: '⭐ Звёзды', coins: '🪙 Монеты', order: '📋 Заказать', execute: '⚡ Выполнить', shop: '🛒 Магазин', tasks: '🎯 Задания', lang: '🌐 Язык', suggest: '💡 Предложить идею', agreement: '📜 Соглашение', topup: '💳 Пополнить', admin: '👑 Админ-панель', back: '⬅️ Назад', choose: 'Выбирай действие:' },
+  en: { menu: '👋 Main Menu', balance: '💰 Balance', stars: '⭐ Stars', coins: '🪙 Coins', order: '📋 Order', execute: '⚡ Execute', shop: '🛒 Shop', tasks: '🎯 Tasks', lang: '🌐 Language', suggest: '💡 Suggest idea', agreement: '📜 Agreement', topup: '💳 Top up', admin: '👑 Admin panel', back: '⬅️ Back', choose: 'Choose an action:' },
 };
-
 function t(uid, key) { return (L[getLang(uid)] || L.ru)[key] || key; }
 
 const AGREEMENT = `📜 Пользовательское соглашение / User Agreement
@@ -236,25 +121,122 @@ const AGREEMENT = `📜 Пользовательское соглашение / 
 5. Запрещены мошенничество, спам, незаконный контент.
 6. Администрация может забанить/ограничить пользователя.
 7. Споры разрешаются администрацией.
-8. Игровая валюта (монеты) зарабатывается за приглашения.
+8. Игровая валюта (монеты) зарабатывается за задания.`;
 
-Нажимая «Принимаю», вы соглашаетесь с условиями.`;
+function getLang(uid) { return userLang.get(String(uid)) || 'ru'; }
+function setLang(uid, l) { userLang.set(String(uid), l); saveState(); }
 
-function agreementKeyboard() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('✅ Принимаю / Accept', 'agree_yes')],
-    [Markup.button.callback('❌ Отказываюсь / Decline', 'agree_no')],
-  ]);
+function loadState() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) return;
+    const d = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    nextOrderId = d.nextOrderId || 1;
+    orders.clear(); (d.orders || []).forEach(([id, o]) => orders.set(id, o));
+    userStars.clear(); (d.userStars || []).forEach(([uid, n]) => userStars.set(uid, n));
+    userCoins.clear(); (d.userCoins || []).forEach(([uid, n]) => userCoins.set(uid, n));
+    userLang.clear(); (d.userLang || []).forEach(([uid, l]) => userLang.set(uid, l));
+    ownedTitles.clear(); (d.ownedTitles || []).forEach(([uid, arr]) => ownedTitles.set(uid, new Set(arr)));
+    activeTitle.clear(); (d.activeTitle || []).forEach(([uid, t]) => activeTitle.set(uid, t));
+    agreed.clear(); (d.agreed || []).forEach(x => agreed.add(String(x)));
+    banned.clear(); (d.banned || []).forEach(x => banned.add(String(x)));
+    restricted.clear(); (d.restricted || []).forEach(x => restricted.add(String(x)));
+    admins.clear(); (d.admins || [MAIN_ADMIN]).forEach(x => admins.add(String(x)));
+    users.clear(); (d.users || []).forEach(x => users.add(String(x)));
+    transactions.length = 0; (d.transactions || []).forEach(t => transactions.push(t));
+    referrals.clear(); (d.referrals || []).forEach(([inv, arr]) => referrals.set(inv, new Set(arr)));
+    invitedBy.clear(); (d.invitedBy || []).forEach(([u, inv]) => invitedBy.set(u, inv));
+    referralCount.clear(); (d.referralCount || []).forEach(([inv, n]) => referralCount.set(inv, n));
+    userFish.clear(); (d.userFish || []).forEach(([uid, arr]) => userFish.set(uid, arr));
+    userInventory.clear(); (d.userInventory || []).forEach(([uid, arr]) => userInventory.set(uid, arr));
+    mail.clear(); (d.mail || []).forEach(([uid, arr]) => mail.set(uid, arr));
+    news.length = 0; (d.news || []).forEach(n => news.push(n));
+    videos.clear(); (d.videos || []).forEach(([id, v]) => videos.set(id, v));
+    nextVideoId = d.nextVideoId || 1;
+    auction.clear(); (d.auction || []).forEach(([id, a]) => auction.set(id, a));
+    nextAuctionId = d.nextAuctionId || 1;
+    userProfiles.clear(); (d.userProfiles || []).forEach(([uid, p]) => userProfiles.set(uid, p));
+    fishingCooldown.clear(); (d.fishingCooldown || []).forEach(([uid, t]) => fishingCooldown.set(uid, t));
+    userTasksClaimed.clear(); (d.userTasksClaimed || []).forEach(([uid, arr]) => userTasksClaimed.set(uid, new Set(arr)));
+    userInvested.clear(); (d.userInvested || []).forEach(([uid, n]) => userInvested.set(uid, n));
+    userCompletedOrders.clear(); (d.userCompletedOrders || []).forEach(([uid, n]) => userCompletedOrders.set(uid, n));
+  } catch (e) { console.error('State load error:', e.message); }
 }
+
+function saveState() {
+  try {
+    const data = {
+      nextOrderId, orders: [...orders.entries()],
+      userStars: [...userStars.entries()], userCoins: [...userCoins.entries()],
+      userLang: [...userLang.entries()],
+      ownedTitles: [...ownedTitles.entries()].map(([uid, set]) => [uid, [...set]]),
+      activeTitle: [...activeTitle.entries()],
+      agreed: [...agreed], banned: [...banned], restricted: [...restricted],
+      admins: [...admins], users: [...users],
+      transactions: transactions.slice(-2000),
+      referrals: [...referrals.entries()].map(([inv, set]) => [inv, [...set]]),
+      invitedBy: [...invitedBy.entries()], referralCount: [...referralCount.entries()],
+      userFish: [...userFish.entries()], userInventory: [...userInventory.entries()],
+      mail: [...mail.entries()], news: news.slice(-100),
+      videos: [...videos.entries()], nextVideoId,
+      auction: [...auction.entries()], nextAuctionId,
+      userProfiles: [...userProfiles.entries()],
+      fishingCooldown: [...fishingCooldown.entries()],
+      userTasksClaimed: [...userTasksClaimed.entries()].map(([uid, set]) => [uid, [...set]]),
+      userInvested: [...userInvested.entries()],
+      userCompletedOrders: [...userCompletedOrders.entries()],
+    };
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data));
+  } catch (e) { console.error('State save error:', e.message); }
+}
+loadState();
+
+function getStars(uid) { return userStars.get(String(uid)) || 0; }
+function addStars(uid, n) { userStars.set(String(uid), getStars(uid) + n); saveState(); }
+function getCoins(uid) { return userCoins.get(String(uid)) || 0; }
+function addCoins(uid, n) { userCoins.set(String(uid), getCoins(uid) + n); saveState(); }
+function isAdmin(uid) { return admins.has(String(uid)); }
+function isMainAdmin(uid) { return String(uid) === MAIN_ADMIN; }
+function isBanned(uid) { return banned.has(String(uid)); }
+function isRestricted(uid) { return restricted.has(String(uid)); }
+function genId() { const id = nextOrderId++; saveState(); return id; }
+function getFish(uid) { return userFish.get(String(uid)) || []; }
+function addFish(uid, fish) { const f = getFish(uid); f.push(fish); userFish.set(String(uid), f); saveState(); }
+function getInventory(uid) { return userInventory.get(String(uid)) || []; }
+function addItem(uid, item) { const inv = getInventory(uid); inv.push(item); userInventory.set(String(uid), inv); saveState(); }
+function getMail(uid) { return mail.get(String(uid)) || []; }
+function addMail(uid, msg) { const m = getMail(uid); m.push(msg); mail.set(String(uid), m); saveState(); }
+function getProfile(uid) { if (!userProfiles.has(String(uid))) userProfiles.set(String(uid), { bio: '', avatar: '' }); return userProfiles.get(String(uid)); }
+function incCompletedOrders(uid) { userCompletedOrders.set(String(uid), (userCompletedOrders.get(String(uid)) || 0) + 1); saveState(); }
+function addInvested(uid, n) { userInvested.set(String(uid), (userInvested.get(String(uid)) || 0) + n); saveState(); }
 
 function orderLink(id) {
   const username = bot.botInfo && bot.botInfo.username;
   return username ? `https://t.me/${username}?start=order_${id}` : `Заказ #${id}`;
 }
-
 function referralLink(uid) {
   const username = bot.botInfo && bot.botInfo.username;
   return username ? `https://t.me/${username}?start=ref_${uid}` : `ref_${uid}`;
+}
+
+async function editMsg(ctx, text, markup) {
+  try {
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+      await ctx.editMessageText(text, markup || {});
+      return;
+    }
+  } catch (e) {}
+  await ctx.reply(text, markup || {});
+}
+
+async function editPrompt(uid, text, markup) {
+  const st = userState.get(uid);
+  if (st && st.promptMsgId && st.chatId) {
+    try {
+      await bot.telegram.editMessageText(st.chatId, st.promptMsgId, undefined, text, markup || {});
+      return;
+    } catch (e) {}
+  }
+  await bot.telegram.sendMessage(uid, text, markup || {});
 }
 
 function mainMenu(uid) {
@@ -267,11 +249,8 @@ function mainMenu(uid) {
     [Markup.button.callback(t(uid, 'balance'), 'balance'), Markup.button.callback(t(uid, 'topup'), 'topup_help')],
     [Markup.button.callback(t(uid, 'suggest'), 'suggest_idea'), Markup.button.callback(t(uid, 'agreement'), 'show_agreement')],
     [Markup.button.callback(t(uid, 'lang'), 'lang_switch')],
-    [Markup.button.callback('📱 Mini App', 'miniapp')],
   ];
-  if (isAdmin(uid)) {
-    rows.push([Markup.button.callback(t(uid, 'admin'), 'admin_panel')]);
-  }
+  if (isAdmin(uid)) rows.push([Markup.button.callback(t(uid, 'admin'), 'admin_panel')]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -281,17 +260,19 @@ function menuText(uid) {
   return `${t(uid, 'menu')}${titleStr}\n${t(uid, 'stars')}: ${getStars(uid)} ⭐\n${t(uid, 'coins')}: ${getCoins(uid)} 🪙\n${t(uid, 'choose')}`;
 }
 
-// ---- Start / deep links ----
+function backKeyboard(uid) {
+  return Markup.inlineKeyboard([[Markup.button.callback(t(uid, 'back'), 'back_main')]]);
+}
+
 bot.start(async (ctx) => {
   const uid = ctx.from.id;
   users.add(String(uid));
   saveState();
   if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены. / You are banned.'); return; }
   if (!agreed.has(String(uid))) {
-    await ctx.reply(AGREEMENT, agreementKeyboard());
+    await ctx.reply(AGREEMENT, Markup.inlineKeyboard([[Markup.button.callback('✅ Принимаю / Accept', 'agree_yes'), Markup.button.callback('❌ Отказываюсь / Decline', 'agree_no')]]));
     return;
   }
-
   const payload = ctx.startPayload || '';
   if (payload.startsWith('ref_')) {
     const inviter = payload.split('_')[1];
@@ -305,23 +286,17 @@ bot.start(async (ctx) => {
       try { await bot.telegram.sendMessage(inviter, `🎉 Новый приглашённый! +1 🪙\nВсего приглашено: ${referralCount.get(inviter)}`); } catch (e) {}
     }
   }
-
   if (payload.startsWith('order_')) {
     const id = parseInt(payload.split('_')[1]);
     const order = orders.get(id);
     if (!order) { await ctx.reply('❌ Заказ не найден. / Order not found.', mainMenu(uid)); return; }
-    let text = `📋 Заказ #${order.id}\n\n${order.description}\n\n⭐ ${order.stars} звёзд\nСтатус: ${order.status}`;
-    if (order.status === 'open') {
-      await ctx.reply(text, Markup.inlineKeyboard([
-        [Markup.button.callback('⚡ Взять заказ / Take', `take_${order.id}`)],
-        [Markup.button.callback(t(uid, 'back'), 'back_main')],
-      ]));
-      return;
-    }
-    await ctx.reply(text, mainMenu(uid));
+    let text = `📋 Заказ #${order.id}\n\n${order.description}\n\n${order.currency === 'coins' ? '🪙' : '⭐'} ${order.amount}\nСтатус: ${order.status}`;
+    const kb = order.status === 'open'
+      ? Markup.inlineKeyboard([[Markup.button.callback('⚡ Взять заказ / Take', `take_${order.id}`)], [Markup.button.callback(t(uid, 'back'), 'back_main')]])
+      : mainMenu(uid);
+    await ctx.reply(text, kb);
     return;
   }
-
   await ctx.reply(menuText(uid), mainMenu(uid));
 });
 
@@ -329,97 +304,94 @@ bot.action('agree_yes', async (ctx) => {
   await ctx.answerCbQuery();
   agreed.add(String(ctx.from.id));
   saveState();
-  await ctx.reply('✅ Соглашение принято! / Agreement accepted!', mainMenu(ctx.from.id));
-  await ctx.reply(menuText(ctx.from.id), mainMenu(ctx.from.id));
+  await editMsg(ctx, menuText(ctx.from.id), mainMenu(ctx.from.id));
 });
-
 bot.action('agree_no', async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply('❌ Без принятия соглашения бот недоступен. / Agreement required.');
+  await editMsg(ctx, '❌ Без принятия соглашения бот недоступен. / Agreement required.', Markup.inlineKeyboard([]));
 });
-
 bot.action('show_agreement', async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply(AGREEMENT, agreementKeyboard());
+  await editMsg(ctx, AGREEMENT, Markup.inlineKeyboard([[Markup.button.callback(t(ctx.from.id, 'back'), 'back_main')]]));
 });
-
 bot.action('topup_help', async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply('💳 Пополнение только реальными Telegram Stars:\n\n/pay 10\n/pay 50\n/pay 100\n\nПосле оплаты Stars зачислятся на баланс автоматически.\n\nTop up with real Telegram Stars only.');
+  await editMsg(ctx, '💳 Пополнение только реальными Telegram Stars:\n\n/pay 10\n/pay 50\n/pay 100\n\nПосле оплаты Stars зачислятся на баланс автоматически.\n\nTop up with real Telegram Stars only.', backKeyboard(ctx.from.id));
 });
-
-// ---- Language switch ----
 bot.action('lang_switch', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
   const newLang = getLang(uid) === 'ru' ? 'en' : 'ru';
   setLang(uid, newLang);
-  await ctx.reply(newLang === 'ru' ? '🌐 Язык: Русский' : '🌐 Language: English', mainMenu(uid));
-  await ctx.reply(menuText(uid), mainMenu(uid));
+  await editMsg(ctx, menuText(uid), mainMenu(uid));
 });
-
-// ---- Suggest idea ----
 bot.action('suggest_idea', async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply(`💡 Предложить идею / Suggest an idea\n\nСтоимость: 10 ⭐\nОткрой: ${HELPER_LINK}\n\nНапиши свою идею и мнение — мы рассмотрим!`, Markup.inlineKeyboard([
-    [Markup.button.url('Открыть / Open', HELPER_LINK)],
-    [Markup.button.callback(t(ctx.from.id, 'back'), 'back_main')],
-  ]));
+  await editMsg(ctx, `💡 Предложить идею / Suggest an idea\n\nСтоимость: 10 ⭐\nОткрой: ${HELPER_LINK}\n\nНапиши свою идею и мнение — мы рассмотрим!`, Markup.inlineKeyboard([[Markup.button.url('Открыть / Open', HELPER_LINK)], [Markup.button.callback(t(ctx.from.id, 'back'), 'back_main')]]));
 });
-
-// ---- Order create ----
-bot.action('order_create', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены. / Banned.'); return; }
-  if (!agreed.has(String(uid))) { await ctx.reply(AGREEMENT, agreementKeyboard()); return; }
-  if (isRestricted(uid)) { await ctx.reply('⛔ Вы ограничены в создании заказов. / Restricted.'); return; }
-  userState.set(uid, { mode: 'create_desc' });
-  await ctx.reply('✏️ Опиши, что нужно сделать (текст заказа): / Describe the task:');
-});
-
-bot.action('order_list', async (ctx) => {
-  await ctx.answerCbQuery();
-  const open = [...orders.values()].filter(o => o.status === 'open');
-  if (open.length === 0) {
-    await ctx.reply('📭 Нет открытых заказов. / No open orders.', mainMenu(ctx.from.id));
-    return;
-  }
-  const buttons = open.map(o =>
-    [Markup.button.callback(`#${o.id} — ${o.stars}⭐ ${o.description.slice(0, 30)}`, `take_${o.id}`)]
-  );
-  buttons.push([Markup.button.callback(t(ctx.from.id, 'back'), 'back_main')]);
-  await ctx.reply('⚡ Открытые заказы / Open orders:', Markup.inlineKeyboard(buttons));
-});
-
-bot.action(/^take_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const orderId = parseInt(ctx.match[1]);
-  const order = orders.get(orderId);
-  const uid = ctx.from.id;
-  if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены. / Banned.'); return; }
-  if (!order || order.status !== 'open') { await ctx.reply('❌ Заказ недоступен. / Order unavailable.'); return; }
-  if (order.creatorId === String(uid)) { await ctx.reply('❌ Нельзя брать свой заказ. / Cannot take own order.'); return; }
-  if (isRestricted(uid)) { await ctx.reply('⛔ Вы ограничены в выполнении. / Restricted.'); return; }
-  order.status = 'taken';
-  order.takerId = String(uid);
-  userState.set(uid, { mode: 'submit', orderId });
-  saveState();
-  await ctx.reply(`✅ Взял заказ #${orderId}\n\n${order.description}\n\n⭐ ${order.stars} звёзд\n🔗 ${orderLink(orderId)}\n\nОтправь результат (текст/фото/видео/файл): / Send result (text/photo/video/file):`);
-});
-
-bot.action('back_main', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply(menuText(ctx.from.id), mainMenu(ctx.from.id));
-});
-
 bot.action('balance', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
-  await ctx.reply(`💰 ${t(uid, 'balance')}: ${getStars(uid)} ⭐\n🪙 ${t(uid, 'coins')}: ${getCoins(uid)}\n\nПополнить реально: /pay <сумма> / Top up: /pay <amount>`, mainMenu(uid));
+  await editMsg(ctx, `💰 ${t(uid, 'balance')}: ${getStars(uid)} ⭐\n🪙 ${t(uid, 'coins')}: ${getCoins(uid)}\n\nПополнить реально: /pay <сумма> / Top up: /pay <amount>`, mainMenu(uid));
 });
 
-// ---- Shop ----
+bot.action('profile', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const title = activeTitle.get(String(uid)) || 'Нет титула';
+  const fishCount = getFish(uid).length;
+  const videoCount = [...videos.values()].filter(v => v.creatorId === String(uid)).length;
+  await editMsg(ctx, `👤 Профиль / Profile\n\nID: ${uid}\n⭐ Звёзды: ${getStars(uid)}\n🪙 Монеты: ${getCoins(uid)}\n🏷️ Титул: ${title}\n🎣 Рыб поймано: ${fishCount}\n📺 Видео: ${videoCount}\n🤝 Приглашено: ${referralCount.get(String(uid)) || 0}`, Markup.inlineKeyboard([[Markup.button.callback('🔍 Посмотреть профиль другого / View other', 'profile_view_other')], [Markup.button.callback(t(uid, 'back'), 'back_main')]]));
+});
+
+bot.action('profile_view_other', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  userState.set(uid, { mode: 'profile_view', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  await editMsg(ctx, '🔍 Введи ID пользователя: / Enter user ID:', backKeyboard(uid));
+});
+
+function tasksText(uid) {
+  const claimed = userTasksClaimed.get(String(uid)) || new Set();
+  let text = '🎯 Задания / Tasks\n\n';
+  TASKS.forEach(task => {
+    const done = task.check(uid);
+    const isClaimed = claimed.has(task.id);
+    text += `${isClaimed ? '✅' : done ? '🎁' : '⬜'} ${getLang(uid) === 'ru' ? task.ru : task.en} — +${task.reward} 🪙\n`;
+  });
+  text += `\n🤝 Приглашено: ${referralCount.get(String(uid)) || 0}`;
+  return text;
+}
+function tasksKeyboard(uid) {
+  const claimed = userTasksClaimed.get(String(uid)) || new Set();
+  const rows = [];
+  TASKS.forEach(task => {
+    const done = task.check(uid);
+    if (done && !claimed.has(task.id)) rows.push([Markup.button.callback(`🎁 Забрать: ${getLang(uid) === 'ru' ? task.ru : task.en}`, `claim_task_${task.id}`)]);
+  });
+  rows.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
+  return Markup.inlineKeyboard(rows);
+}
+bot.action('tasks', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  await editMsg(ctx, tasksText(uid), tasksKeyboard(uid));
+});
+bot.action(/^claim_task_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const taskId = ctx.match[1];
+  const task = TASKS.find(t => t.id === taskId);
+  if (!task || !task.check(uid)) { await editMsg(ctx, tasksText(uid), tasksKeyboard(uid)); return; }
+  const claimed = userTasksClaimed.get(String(uid)) || new Set();
+  if (claimed.has(taskId)) { await editMsg(ctx, tasksText(uid), tasksKeyboard(uid)); return; }
+  claimed.add(taskId);
+  userTasksClaimed.set(String(uid), claimed);
+  addCoins(uid, task.reward);
+  saveState();
+  await editMsg(ctx, `✅ Получено +${task.reward} 🪙 за "${getLang(uid) === 'ru' ? task.ru : task.en}"!\n\n` + tasksText(uid), tasksKeyboard(uid));
+});
+
 bot.action('shop', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
@@ -429,279 +401,252 @@ bot.action('shop', async (ctx) => {
   TITLES.forEach(tl => { text += `${tl.name} (${tl.en}) — ${tl.price} 🪙\n`; });
   const owned = ownedTitles.get(String(uid)) || new Set();
   if (owned.size) text += `\nТвои титулы: ${[...owned].join(', ')}`;
-  await ctx.reply(text, Markup.inlineKeyboard(buttons));
+  await editMsg(ctx, text, Markup.inlineKeyboard(buttons));
 });
-
 bot.action(/^buy_title_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
   const titleId = ctx.match[1];
   const title = TITLES.find(t => t.id === titleId);
-  if (!title) { await ctx.reply('❌ Титул не найден. / Title not found.'); return; }
+  if (!title) { await editMsg(ctx, '❌ Титул не найден. / Title not found.', backKeyboard(uid)); return; }
   const owned = ownedTitles.get(String(uid)) || new Set();
-  if (owned.has(titleId)) { await ctx.reply('✅ У тебя уже есть этот титул. / You already own this title.'); return; }
-  if (getCoins(uid) < title.price) { await ctx.reply(`❌ Недостаточно монет. Нужно ${title.price} 🪙, у тебя ${getCoins(uid)}. / Not enough coins.`); return; }
+  if (owned.has(titleId)) { await editMsg(ctx, '✅ У тебя уже есть этот титул. / You already own this title.', backKeyboard(uid)); return; }
+  if (getCoins(uid) < title.price) { await editMsg(ctx, `❌ Недостаточно монет. Нужно ${title.price} 🪙, у тебя ${getCoins(uid)}.`, backKeyboard(uid)); return; }
   addCoins(uid, -title.price);
   owned.add(titleId);
   ownedTitles.set(String(uid), owned);
   activeTitle.set(String(uid), title.name);
   saveState();
-  await ctx.reply(`✅ Куплен титул: ${title.name}! / Purchased: ${title.name}!`, mainMenu(uid));
+  await editMsg(ctx, `✅ Куплен титул: ${title.name}! / Purchased: ${title.name}!`, mainMenu(uid));
 });
 
-// ---- Tasks ----
-bot.action('tasks', async (ctx) => {
+bot.action('order_create', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
-  const link = referralLink(uid);
-  const count = referralCount.get(String(uid)) || 0;
-  await ctx.reply(`🎯 Задания / Tasks\n\n1️⃣ Пригласи друга — +1 🪙 за каждого\nПриглашено: ${count}\n\nТвоя ссылка:\n${link}\n\nОтправь её друзьям. Когда они перейдут по ссылке и запустят бота, ты получишь +1 🪙.`, Markup.inlineKeyboard([
-    [Markup.button.url('🔗 Поделиться / Share', `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent('Присоединяйся к боту!')}`)],
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (!agreed.has(String(uid))) { await editMsg(ctx, AGREEMENT, Markup.inlineKeyboard([[Markup.button.callback('✅ Принимаю / Accept', 'agree_yes'), Markup.button.callback('❌ Отказываюсь / Decline', 'agree_no')]])); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены в создании заказов. / Restricted.', mainMenu(uid)); return; }
+  userState.set(uid, { mode: 'create_desc', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  await editMsg(ctx, '✏️ Опиши, что нужно сделать (текст заказа): / Describe the task:', backKeyboard(uid));
+});
+
+bot.action('order_list', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const open = [...orders.values()].filter(o => o.status === 'open');
+  if (open.length === 0) { await editMsg(ctx, '📭 Нет открытых заказов. / No open orders.', mainMenu(uid)); return; }
+  const buttons = open.map(o => [Markup.button.callback(`#${o.id} — ${o.currency === 'coins' ? '🪙' : '⭐'} ${o.amount} ${o.description.slice(0, 30)}`, `take_${o.id}`)]);
+  buttons.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
+  await editMsg(ctx, '⚡ Открытые заказы / Open orders:', Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^take_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const orderId = parseInt(ctx.match[1]);
+  const order = orders.get(orderId);
+  const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (!order || order.status !== 'open') { await editMsg(ctx, '❌ Заказ недоступен. / Order unavailable.', mainMenu(uid)); return; }
+  if (order.creatorId === String(uid)) { await editMsg(ctx, '❌ Нельзя брать свой заказ. / Cannot take own order.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены в выполнении. / Restricted.', mainMenu(uid)); return; }
+  order.status = 'taken';
+  order.takerId = String(uid);
+  userState.set(uid, { mode: 'submit', orderId, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  saveState();
+  await editMsg(ctx, `✅ Взял заказ #${orderId}\n\n${order.description}\n\n${order.currency === 'coins' ? '🪙' : '⭐'} ${order.amount}\n🔗 ${orderLink(orderId)}\n\nОтправь результат (текст/фото/видео/файл): / Send result:`, backKeyboard(uid));
+});
+
+bot.action('back_main', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  await editMsg(ctx, menuText(uid), mainMenu(uid));
+});
+
+// ---- Fishing ----
+bot.action('fishing', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены.', mainMenu(uid)); return; }
+  const last = fishingCooldown.get(String(uid)) || 0;
+  const now = Date.now();
+  if (now - last < FISH_COOLDOWN) {
+    const remaining = Math.ceil((FISH_COOLDOWN - (now - last)) / 1000 / 60);
+    await editMsg(ctx, `🎣 Рыбалка на кулдауне. Осталось ${remaining} мин.\nFishing on cooldown. ${remaining} min left.`, mainMenu(uid));
+    return;
+  }
+  const fish = rollFish();
+  fishingCooldown.set(String(uid), now);
+  addFish(uid, fish);
+  saveState();
+  await editMsg(ctx, `🎣 Ты поймал: ${fish.emoji} ${fish.name} (${fish.rarity})!\nЦенность: ${fish.value} 🪙\n\nКД: 12 часов. / Cooldown: 12h.`, Markup.inlineKeyboard([
+    [Markup.button.callback('📦 Инвентарь / Inventory', 'fish_inventory')],
+    [Markup.button.callback('💰 Аукцион / Auction', 'auction_list')],
     [Markup.button.callback(t(uid, 'back'), 'back_main')],
   ]));
 });
 
-// ---- Real Stars payment ----
-bot.command('pay', async (ctx) => {
+bot.action('fish_inventory', async (ctx) => {
+  await ctx.answerCbQuery();
   const uid = ctx.from.id;
-  const parts = ctx.message.text.split(' ');
-  const amount = parseInt(parts[1]);
-  if (!amount || amount <= 0) { await ctx.reply('Использование: /pay <сумма в звёздах> / Usage: /pay <amount>'); return; }
-  await ctx.replyWithInvoice({
-    title: 'Пополнение баланса / Top up',
-    description: `Пополнение на ${amount} Telegram Stars`,
-    payload: `topup_${uid}_${amount}_${Date.now()}`,
-    currency: 'XTR',
-    prices: [{ label: 'Telegram Stars', amount }],
-    provider_token: '',
+  const fish = getFish(uid);
+  if (fish.length === 0) { await editMsg(ctx, '📦 Инвентарь пуст. / Inventory empty.', mainMenu(uid)); return; }
+  const counts = {};
+  fish.forEach(f => { counts[f.name] = (counts[f.name] || 0) + 1; });
+  let text = '📦 Твой улов / Your catch:\n\n';
+  for (const [name, count] of Object.entries(counts)) {
+    const f = fish.find(x => x.name === name);
+    text += `${f.emoji} ${name} (${f.rarity}) x${count} — ${f.value} 🪙\n`;
+  }
+  await editMsg(ctx, text, Markup.inlineKeyboard([
+    [Markup.button.callback('💰 Выставить на аукцион / Auction', 'auction_sell')],
+    [Markup.button.callback(t(uid, 'back'), 'back_main')],
+  ]));
+});
+
+bot.action('auction_list', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const items = [...auction.values()].filter(a => a.status === 'open');
+  if (items.length === 0) { await editMsg(ctx, '💰 Аукцион пуст. / Auction empty.', mainMenu(uid)); return; }
+  const buttons = items.map(a => [Markup.button.callback(`#${a.id} ${a.fish.emoji} ${a.fish.name} — ${a.price}⭐`, `bid_${a.id}`)]);
+  buttons.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
+  await editMsg(ctx, '💰 Аукцион / Auction:', Markup.inlineKeyboard(buttons));
+});
+
+bot.action('auction_sell', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const fish = getFish(uid);
+  if (fish.length === 0) { await editMsg(ctx, '❌ Нет рыбы для продажи. / No fish to sell.', mainMenu(uid)); return; }
+  const rows = fish.map((f, i) => [Markup.button.callback(`${f.emoji} ${f.name} (${f.rarity})`, `sellfish_${i}`)]);
+  rows.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
+  userState.set(uid, { mode: 'auction_select', fish, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  await editMsg(ctx, '💰 Выбери рыбу для выставления на аукцион: / Choose fish to list:', Markup.inlineKeyboard(rows));
+});
+
+bot.action(/^sellfish_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const st = userState.get(uid);
+  if (!st || st.mode !== 'auction_select') { await editMsg(ctx, menuText(uid), mainMenu(uid)); return; }
+  const idx = parseInt(ctx.match[1]);
+  const fish = st.fish[idx];
+  if (!fish) { await editMsg(ctx, '❌ Рыба не найдена. / Fish not found.', mainMenu(uid)); return; }
+  userState.set(uid, { mode: 'auction_price', fish, fishIndex: idx, fishList: st.fish, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  await editMsg(ctx, `💰 ${fish.emoji} ${fish.name}\nВведи цену в звёздах: / Enter price in stars:`, backKeyboard(uid));
+});
+
+bot.action(/^bid_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const id = parseInt(ctx.match[1]);
+  const item = auction.get(id);
+  if (!item || item.status !== 'open') { await editMsg(ctx, '❌ Лот недоступен. / Lot unavailable.', mainMenu(uid)); return; }
+  if (item.sellerId === String(uid)) { await editMsg(ctx, '❌ Нельзя купить свой лот. / Cannot buy own lot.', mainMenu(uid)); return; }
+  if (getStars(uid) < item.price) { await editMsg(ctx, `❌ Недостаточно звёзд. Нужно ${item.price}⭐. / Not enough stars.`, mainMenu(uid)); return; }
+  addStars(uid, -item.price);
+  addCoins(item.sellerId, item.price);
+  addFish(uid, item.fish);
+  item.status = 'sold';
+  item.buyerId = String(uid);
+  saveState();
+  await editMsg(ctx, `✅ Куплено: ${item.fish.emoji} ${item.fish.name} за ${item.price}⭐!\nПродавец получил ${item.price} 🪙`, mainMenu(uid));
+  try { await bot.telegram.sendMessage(item.sellerId, `💰 Твоя рыба ${item.fish.emoji} ${item.fish.name} продана за ${item.price}⭐! Ты получил ${item.price} 🪙`); } catch (e) {}
+});
+
+bot.action('internet', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  await editMsg(ctx, '🛒 Интернет / Internet\n\nВыбери действие:', Markup.inlineKeyboard([
+    [Markup.button.callback('📺 Смотреть видео / Watch', 'video_list')],
+    [Markup.button.callback('🎬 Создать видео / Create', 'video_create')],
+    [Markup.button.callback('🔍 Поиск / Search', 'video_search')],
+    [Markup.button.callback(t(uid, 'back'), 'back_main')],
+  ]));
+});
+
+bot.action('video_list', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const list = [...videos.values()].sort((a, b) => (b.invested || 0) - (a.invested || 0)).slice(0, 15);
+  if (list.length === 0) { await editMsg(ctx, '📺 Видео пока нет. / No videos yet.', mainMenu(uid)); return; }
+  const buttons = list.map(v => [Markup.button.callback(`${v.title} (${v.invested || 0}🪙)`, `view_video_${v.id}`)]);
+  buttons.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
+  await editMsg(ctx, '📺 Рекомендации / Recommendations:', Markup.inlineKeyboard(buttons));
+});
+
+bot.action('video_create', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  userState.set(uid, { mode: 'video_title', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  await editMsg(ctx, '🎬 Введи название видео: / Enter video title:', backKeyboard(uid));
+});
+
+bot.action('video_search', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  userState.set(uid, { mode: 'video_search', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  await editMsg(ctx, '🔍 Введи название для поиска: / Enter search query:', backKeyboard(uid));
+});
+
+bot.action(/^view_video_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const id = parseInt(ctx.match[1]);
+  const video = videos.get(id);
+  if (!video) { await editMsg(ctx, '❌ Видео не найдено. / Video not found.', mainMenu(uid)); return; }
+  await editMsg(ctx, `📺 ${video.title}\n\nАвтор: ${video.creatorName}\nИнвестиций: ${video.invested || 0} 🪙\n\n${video.description || ''}`, Markup.inlineKeyboard([
+    [Markup.button.callback('💰 Инвестировать / Invest', `invest_${id}`)],
+    [Markup.button.callback('👤 Профиль автора / Author profile', `profile_view_${video.creatorId}`)],
+    [Markup.button.callback(t(uid, 'back'), 'back_main')],
+  ]));
+});
+
+bot.action(/^invest_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const id = parseInt(ctx.match[1]);
+  const video = videos.get(id);
+  if (!video) { await editMsg(ctx, '❌ Видео не найдено. / Video not found.', mainMenu(uid)); return; }
+  userState.set(uid, { mode: 'invest_amount', videoId: id, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  await editMsg(ctx, '💰 Сколько монет инвестировать? / How many coins to invest?', backKeyboard(uid));
+});
+
+bot.action('news', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  if (news.length === 0) { await editMsg(ctx, '📰 Новостей пока нет. / No news yet.', mainMenu(uid)); return; }
+  let text = '📰 Новости / News:\n\n';
+  news.slice(-10).reverse().forEach(n => { text += `📌 ${n.title}\n${n.text}\n— ${new Date(n.at).toLocaleDateString('ru-RU')}\n\n`; });
+  await editMsg(ctx, text, mainMenu(uid));
+});
+
+bot.action('donate', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  userState.set(uid, { mode: 'donate_target', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  await editMsg(ctx, '💰 Введи ID пользователя для доната игровой валюты: / Enter user ID to donate coins:', backKeyboard(uid));
+});
+
+bot.action('mail', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const messages = getMail(uid);
+  if (messages.length === 0) { await editMsg(ctx, '📧 Почта пуста. / Mailbox empty.', mainMenu(uid)); return; }
+  let text = '📧 Твоя почта / Your mail:\n\n';
+  messages.slice(-20).reverse().forEach((m, i) => {
+    text += `${i + 1}. ${m.text || 'Подарок'} ${m.gift ? `🎁 ${m.gift}` : ''}\n`;
+    if (m.gift) { addCoins(uid, m.giftCoins || 0); if (m.giftTitle) { const owned = ownedTitles.get(String(uid)) || new Set(); owned.add(m.giftTitle); ownedTitles.set(String(uid), owned); } }
   });
-});
-
-bot.on('pre_checkout_query', async (ctx) => {
-  await ctx.answerPreCheckoutQuery(true);
-});
-
-bot.on('successful_payment', async (ctx) => {
-  const uid = ctx.from.id;
-  const payment = ctx.message.successful_payment;
-  const amount = payment.total_amount;
-  addStars(uid, amount);
-  transactions.push({ uid: String(uid), amount, type: 'topup', at: Date.now(), chargeId: payment.telegram_payment_charge_id });
+  mail.set(String(uid), []);
   saveState();
-  await ctx.reply(`✅ Баланс пополнен на ${amount} ⭐\n💰 Текущий баланс: ${getStars(uid)} ⭐`, mainMenu(uid));
-  try { await bot.telegram.sendMessage(MAIN_ADMIN, `💰 Реальное пополнение: ${ctx.from.first_name} (${uid}) +${amount}⭐`); } catch (e) {}
+  await editMsg(ctx, text, mainMenu(uid));
 });
 
-// ---- Text handler ----
-bot.on('text', async (ctx) => {
-  const uid = ctx.from.id;
-  if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены. / Banned.'); return; }
-  const state = userState.get(uid);
-  const text = ctx.message.text;
-
-  if (state && state.mode === 'create_desc') {
-    state.description = text;
-    state.mode = 'create_amount';
-    userState.set(uid, state);
-    await ctx.reply('⭐ Сколько звёзд заплатить за заказ? (число) / How many stars? (number)');
-    return;
-  }
-
-  if (state && state.mode === 'create_amount') {
-    const n = parseInt(text);
-    if (!n || n <= 0) { await ctx.reply('❌ Введи положительное число. / Enter positive number.'); return; }
-    if (getStars(uid) < n) {
-      await ctx.reply(`❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐. Пополни реально: /pay ${n - getStars(uid)}\nNot enough stars. Top up: /pay ${n - getStars(uid)}`);
-      userState.delete(uid);
-      await ctx.reply(menuText(uid), mainMenu(uid));
-      return;
-    }
-    const commission = Math.ceil(n * COMMISSION);
-    const payout = n - commission;
-    addStars(uid, -n);
-    const id = genId();
-    orders.set(id, {
-      id, creatorId: String(uid), creatorName: ctx.from.first_name || 'User',
-      description: state.description, stars: n, commission, payout,
-      status: 'open', takerId: null, submissions: [], createdAt: Date.now(),
-      link: orderLink(id),
-    });
-    saveState();
-    userState.delete(uid);
-    await ctx.reply(`✅ Заказ #${id} создан!\n\n${state.description}\n⭐ ${n} звёзд (комиссия 5% = ${commission}⭐)\n🔗 Ссылка: ${orderLink(id)}\n\nОпубликован. / Created.`, mainMenu(uid));
-    try { await bot.telegram.sendMessage(MAIN_ADMIN, `📋 Новый заказ #${id} от ${ctx.from.first_name}: ${state.description} (${n}⭐)\n🔗 ${orderLink(id)}`); } catch (e) {}
-    return;
-  }
-
-  if (state && state.mode === 'submit') {
-    const order = orders.get(state.orderId);
-    if (!order) { userState.delete(uid); await ctx.reply('❌ Заказ не найден. / Order not found.', mainMenu(uid)); return; }
-    order.submissions.push({ type: 'text', content: text, from: String(uid), at: Date.now() });
-    order.status = 'completed';
-    userState.delete(uid);
-    addStars(uid, order.payout);
-    addCoins(uid, 1); // bonus coin for completing order
-    transactions.push({ uid: String(uid), amount: order.payout, type: 'payout', orderId: order.id, at: Date.now() });
-    saveState();
-    await ctx.reply(`✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${order.payout} ⭐ +1 🪙`, mainMenu(uid));
-    try { await bot.telegram.sendMessage(order.creatorId, `✅ Заказ #${order.id} выполнен!\n\nРезультат:\n${text}\n🔗 ${orderLink(order.id)}`); } catch (e) {}
-    try { await bot.telegram.sendMessage(MAIN_ADMIN, `✅ Заказ #${order.id} выполнен. Исполнитель получил ${order.payout}⭐ +1🪙`); } catch (e) {}
-    return;
-  }
-
-  if (state && state.mode === 'video_title') {
-    const id = nextVideoId++;
-    videos.set(id, { id, title: text, description: '', creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now() });
-    saveState();
-    userState.delete(uid);
-    await ctx.reply(`✅ Видео "${text}" создано! / Video created!`, mainMenu(uid));
-    return;
-  }
-
-  if (state && state.mode === 'video_search') {
-    const q = text.toLowerCase();
-    const results = [...videos.values()].filter(v => v.title.toLowerCase().includes(q));
-    userState.delete(uid);
-    if (results.length === 0) { await ctx.reply('🔍 Ничего не найдено. / Nothing found.', mainMenu(uid)); return; }
-    const buttons = results.map(v => [Markup.button.callback(`${v.title} (${v.invested || 0}🪙)`, `view_video_${v.id}`)]);
-    buttons.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
-    await ctx.reply('🔍 Результаты поиска / Search results:', Markup.inlineKeyboard(buttons));
-    return;
-  }
-
-  if (state && state.mode === 'invest_amount') {
-    const n = parseInt(text);
-    if (!n || n <= 0) { await ctx.reply('❌ Введи число. / Enter number.'); return; }
-    if (getCoins(uid) < n) { await ctx.reply(`❌ Недостаточно монет. У тебя ${getCoins(uid)} 🪙. / Not enough coins.`); return; }
-    const video = videos.get(state.videoId);
-    if (!video) { userState.delete(uid); await ctx.reply('❌ Видео не найдено. / Video not found.', mainMenu(uid)); return; }
-    addCoins(uid, -n);
-    video.invested = (video.invested || 0) + n;
-    saveState();
-    userState.delete(uid);
-    await ctx.reply(`✅ Инвестировано ${n} 🪙 в "${video.title}"! / Invested ${n} coins!`, mainMenu(uid));
-    return;
-  }
-
-  if (state && state.mode === 'donate_target') {
-    const target = text.trim();
-    if (target === String(uid)) { await ctx.reply('❌ Нельзя донатить себе. / Cannot donate to yourself.'); userState.delete(uid); return; }
-    userState.set(uid, { mode: 'donate_amount', target });
-    await ctx.reply('💰 Сколько монет донатить? / How many coins to donate?');
-    return;
-  }
-
-  if (state && state.mode === 'donate_amount') {
-    const n = parseInt(text);
-    if (!n || n <= 0) { await ctx.reply('❌ Введи число. / Enter number.'); return; }
-    if (getCoins(uid) < n) { await ctx.reply(`❌ Недостаточно монет. У тебя ${getCoins(uid)} 🪙. / Not enough coins.`); return; }
-    const target = state.target;
-    addCoins(uid, -n);
-    addCoins(target, n);
-    saveState();
-    userState.delete(uid);
-    await ctx.reply(`✅ Донат ${n} 🪙 отправлен пользователю ${target}! / Donated ${n} coins to ${target}!`, mainMenu(uid));
-    try { await bot.telegram.sendMessage(target, `💰 Тебе донатили ${n} 🪙 от пользователя ${uid}!`); } catch (e) {}
-    return;
-  }
-
-  if (state && state.mode === 'profile_view') {
-    userState.delete(uid);
-    const target = text.trim();
-    if (target === MAIN_ADMIN) { await ctx.reply('🔒 Профиль администратора скрыт. / Admin profile is hidden.', mainMenu(uid)); return; }
-    const title = activeTitle.get(target) || 'Нет титула';
-    const fishCount = (userFish.get(target) || []).length;
-    const videoCount = [...videos.values()].filter(v => v.creatorId === target).length;
-    await ctx.reply(`👤 Профиль #${target}\n\n⭐ Звёзды: ${getStars(target)}\n🪙 Монеты: ${getCoins(target)}\n🏷️ Титул: ${title}\n🎣 Рыб: ${fishCount}\n📺 Видео: ${videoCount}\n🤝 Приглашено: ${referralCount.get(target) || 0}`, Markup.inlineKeyboard([
-      [Markup.button.callback('💰 Донатить / Donate', `donate_to_${target}`)],
-      [Markup.button.callback(t(uid, 'back'), 'back_main')],
-    ]));
-    return;
-  }
-
-  if (state && state.mode === 'auction_price') {
-    const n = parseInt(text);
-    if (!n || n <= 0) { await ctx.reply('❌ Введи число. / Enter number.'); return; }
-    const fish = state.fish;
-    if (!fish || fish.length === 0) { userState.delete(uid); await ctx.reply('❌ Нет рыбы. / No fish.', mainMenu(uid)); return; }
-    const selected = fish[0];
-    const idx = fish.indexOf(selected);
-    fish.splice(idx, 1);
-    userFish.set(String(uid), fish);
-    const id = nextAuctionId++;
-    auction.set(id, { id, fish: selected, price: n, sellerId: String(uid), status: 'open', createdAt: Date.now() });
-    saveState();
-    userState.delete(uid);
-    await ctx.reply(`✅ Рыба ${selected.emoji} ${selected.name} выставлена на аукцион за ${n}⭐! / Fish listed for ${n} stars!`, mainMenu(uid));
-    return;
-  }
-
-  if (state && state.mode === 'donate_to') {
-    // handled via button
-  }
-
-  if (isAdmin(uid) && text.startsWith('/news')) {
-    const newsText = text.replace('/news', '').trim();
-    if (!newsText) { await ctx.reply('Использование: /news <текст>'); return; }
-    news.push({ title: 'Новость / News', text: newsText, at: Date.now() });
-    saveState();
-    await ctx.reply('✅ Новость опубликована. / News published.');
-    // рассылка
-    for (const u of users) {
-      try { await bot.telegram.sendMessage(u, `📰 Новая новость / New news:\n\n${newsText}`); } catch (e) {}
-    }
-    return;
-  }
-
-  if (isAdmin(uid) && text.startsWith('/')) {
-    await handleAdminCommand(ctx, text);
-    return;
-  }
-
-  await ctx.reply(menuText(uid), mainMenu(uid));
-});
-
-// ---- Media handler ----
-async function handleMedia(ctx, type) {
-  const uid = ctx.from.id;
-  const state = userState.get(uid);
-  if (!state || state.mode !== 'submit') return false;
-  const order = orders.get(state.orderId);
-  if (!order) { userState.delete(uid); await ctx.reply('❌ Заказ не найден. / Order not found.', mainMenu(uid)); return true; }
-
-  let fileId = null;
-  if (type === 'photo') fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-  else if (type === 'video') fileId = ctx.message.video.file_id;
-  else if (type === 'document') fileId = ctx.message.document.file_id;
-
-  const caption = ctx.message.caption || '';
-  order.submissions.push({ type, fileId, caption, from: String(uid), at: Date.now() });
-  order.status = 'completed';
-  userState.delete(uid);
-  addStars(uid, order.payout);
-  addCoins(uid, 1);
-  transactions.push({ uid: String(uid), amount: order.payout, type: 'payout', orderId: order.id, at: Date.now() });
-  saveState();
-  await ctx.reply(`✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${order.payout} ⭐ +1 🪙`, mainMenu(uid));
-
-  try {
-    if (type === 'photo') await bot.telegram.sendPhoto(order.creatorId, fileId, { caption: `✅ Заказ #${order.id} выполнен!\n${caption}\n🔗 ${orderLink(order.id)}` });
-    else if (type === 'video') await bot.telegram.sendVideo(order.creatorId, fileId, { caption: `✅ Заказ #${order.id} выполнен!\n${caption}\n🔗 ${orderLink(order.id)}` });
-    else await bot.telegram.sendDocument(order.creatorId, fileId, { caption: `✅ Заказ #${order.id} выполнен!\n${caption}\n🔗 ${orderLink(order.id)}` });
-  } catch (e) {}
-  try { await bot.telegram.sendMessage(MAIN_ADMIN, `✅ Заказ #${order.id} выполнен (${type}).`); } catch (e) {}
-  return true;
-}
-
-bot.on('photo', async (ctx) => { if (!(await handleMedia(ctx, 'photo'))) await ctx.reply(menuText(ctx.from.id), mainMenu(ctx.from.id)); });
-bot.on('video', async (ctx) => { if (!(await handleMedia(ctx, 'video'))) await ctx.reply(menuText(ctx.from.id), mainMenu(ctx.from.id)); });
-bot.on('document', async (ctx) => { if (!(await handleMedia(ctx, 'document'))) await ctx.reply(menuText(ctx.from.id), mainMenu(ctx.from.id)); });
-
-// ---- Admin panel ----
 bot.action('admin_panel', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
-  if (!isAdmin(uid)) { await ctx.reply('❌ Нет доступа. / No access.'); return; }
+  if (!isAdmin(uid)) { await editMsg(ctx, '❌ Нет доступа. / No access.', mainMenu(uid)); return; }
   const totalOrders = orders.size;
   const openOrders = [...orders.values()].filter(o => o.status === 'open').length;
   const completedOrders = [...orders.values()].filter(o => o.status === 'completed').length;
@@ -709,7 +654,6 @@ bot.action('admin_panel', async (ctx) => {
   const totalStars = [...userStars.values()].reduce((a, b) => a + b, 0);
   const totalCoins = [...userCoins.values()].reduce((a, b) => a + b, 0);
   const commissionEarned = [...orders.values()].filter(o => o.status === 'completed').reduce((a, o) => a + (o.commission || 0), 0);
-
   const text = `👑 АДМИН-ПАНЕЛЬ / ADMIN PANEL
 
 📊 Статистика:
@@ -728,22 +672,19 @@ bot.action('admin_panel', async (ctx) => {
     [Markup.button.callback('⛔ Ограничения / Restrict', 'admin_restrict')],
     [Markup.button.callback('💳 Пополнения / Topups', 'admin_topups')],
     [Markup.button.callback('👑 Управление админами / Admins', 'admin_manage')],
-    [Markup.button.callback('📱 Mini App', 'admin_miniapp')],
     [Markup.button.callback(t(uid, 'back'), 'back_main')],
   ];
-  await ctx.reply(text, Markup.inlineKeyboard(rows));
+  await editMsg(ctx, text, Markup.inlineKeyboard(rows));
 });
 
 bot.action('admin_orders', async (ctx) => {
   await ctx.answerCbQuery();
   if (!isAdmin(ctx.from.id)) return;
   const list = [...orders.values()].slice(-20).reverse();
-  if (list.length === 0) { await ctx.reply('Нет заказов. / No orders.'); return; }
+  if (list.length === 0) { await editMsg(ctx, 'Нет заказов. / No orders.', backKeyboard(ctx.from.id)); return; }
   let text = '📋 Последние заказы / Recent orders:\n\n';
-  for (const o of list) {
-    text += `#${o.id} ${o.status} | ${o.stars}⭐ | ${o.description.slice(0, 40)}\n🔗 ${orderLink(o.id)}\n\n`;
-  }
-  await ctx.reply(text);
+  for (const o of list) text += `#${o.id} ${o.status} | ${o.currency === 'coins' ? '🪙' : '⭐'} ${o.amount} | ${o.description.slice(0, 40)}\n🔗 ${orderLink(o.id)}\n\n`;
+  await editMsg(ctx, text, backKeyboard(ctx.from.id));
 });
 
 bot.action('admin_users', async (ctx) => {
@@ -755,71 +696,35 @@ bot.action('admin_users', async (ctx) => {
     if (i++ > 50) break;
     text += `${u} — ${getStars(u)}⭐ ${getCoins(u)}🪙 ${banned.has(u) ? '🚫' : ''} ${restricted.has(u) ? '⛔' : ''} ${admins.has(u) ? '👑' : ''}\n`;
   }
-  await ctx.reply(text);
+  await editMsg(ctx, text, backKeyboard(ctx.from.id));
 });
 
 bot.action('admin_bans', async (ctx) => {
   await ctx.answerCbQuery();
   if (!isAdmin(ctx.from.id)) return;
-  await ctx.reply('🚫 Управление банами / Bans:\n\n/ban <userId>\n/unban <userId>');
+  await editMsg(ctx, '🚫 Управление банами / Bans:\n\n/ban <userId>\n/unban <userId>', backKeyboard(ctx.from.id));
 });
 
 bot.action('admin_restrict', async (ctx) => {
   await ctx.answerCbQuery();
   if (!isAdmin(ctx.from.id)) return;
-  await ctx.reply('⛔ Ограничения / Restrictions:\n\n/restrict <userId>\n/unrestrict <userId>');
+  await editMsg(ctx, '⛔ Ограничения / Restrictions:\n\n/restrict <userId>\n/unrestrict <userId>', backKeyboard(ctx.from.id));
 });
 
 bot.action('admin_topups', async (ctx) => {
   await ctx.answerCbQuery();
   if (!isAdmin(ctx.from.id)) return;
   const list = transactions.filter(t => t.type === 'topup').slice(-20).reverse();
-  if (list.length === 0) { await ctx.reply('Пополнений пока нет. / No topups yet.'); return; }
+  if (list.length === 0) { await editMsg(ctx, 'Пополнений пока нет. / No topups yet.', backKeyboard(ctx.from.id)); return; }
   let text = '💳 Последние пополнения / Recent topups:\n\n';
-  for (const t of list) {
-    text += `${t.uid} +${t.amount}⭐ (${new Date(t.at).toLocaleString('ru-RU')})\n`;
-  }
-  await ctx.reply(text);
+  for (const t of list) text += `${t.uid} +${t.amount}⭐ (${new Date(t.at).toLocaleString('ru-RU')})\n`;
+  await editMsg(ctx, text, backKeyboard(ctx.from.id));
 });
 
 bot.action('admin_manage', async (ctx) => {
   await ctx.answerCbQuery();
-  if (!isMainAdmin(ctx.from.id)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
-  await ctx.reply('👑 Управление админами / Admin management:\n\n/addadmin <userId>\n/removeadmin <userId>\n/listadmins');
-});
-
-bot.action('admin_miniapp', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  if (!isAdmin(uid)) return;
-  const data = {
-    users: users.size,
-    orders: orders.size,
-    open: [...orders.values()].filter(o => o.status === 'open').length,
-    completed: [...orders.values()].filter(o => o.status === 'completed').length,
-    stars: [...userStars.values()].reduce((a, b) => a + b, 0),
-    coins: [...userCoins.values()].reduce((a, b) => a + b, 0),
-    commission: [...orders.values()].filter(o => o.status === 'completed').reduce((a, o) => a + (o.commission || 0), 0),
-    banned: banned.size,
-    restricted: restricted.size,
-    admins: admins.size,
-    referrals: [...referralCount.values()].reduce((a, b) => a + b, 0),
-  };
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Admin</title>
-  <style>body{font-family:sans-serif;padding:20px;background:#1a1a2e;color:#eee}h1{color:#00d4ff}.card{background:#16213e;padding:15px;margin:10px 0;border-radius:10px}.num{font-size:2em;color:#00d4ff}</style></head>
-  <body><h1>👑 Admin Dashboard</h1>
-  <div class="card">👥 Пользователи / Users: <span class="num">${data.users}</span></div>
-  <div class="card">📋 Заказов / Orders: <span class="num">${data.orders}</span> (открыто ${data.open}, выполнено ${data.completed})</div>
-  <div class="card">⭐ Звёзд / Stars: <span class="num">${data.stars}</span></div>
-  <div class="card">🪙 Монет / Coins: <span class="num">${data.coins}</span></div>
-  <div class="card">💰 Комиссия / Commission: <span class="num">${data.commission}</span></div>
-  <div class="card">💳 Реальных пополнений / Topups: ${transactions.filter(t=>t.type==='topup').length}</div>
-  <div class="card">🤝 Приглашений / Referrals: <span class="num">${data.referrals}</span></div>
-  <div class="card">🚫 Забанено / Banned: <span class="num">${data.banned}</span></div>
-  <div class="card">⛔ Ограничено / Restricted: <span class="num">${data.restricted}</span></div>
-  <div class="card">👑 Админов / Admins: <span class="num">${data.admins}</span></div>
-  </body></html>`;
-  await ctx.reply('📱 Mini App данные (HTML):\n' + html.slice(0, 3500));
+  if (!isMainAdmin(ctx.from.id)) { await editMsg(ctx, '❌ Только главный админ. / Main admin only.', backKeyboard(ctx.from.id)); return; }
+  await editMsg(ctx, '👑 Управление админами / Admin management:\n\n/addadmin <userId>\n/removeadmin <userId>\n/listadmins', backKeyboard(ctx.from.id));
 });
 
 // ---- Admin commands ----
@@ -828,7 +733,6 @@ async function handleAdminCommand(ctx, text) {
   if (!isAdmin(uid)) return;
   const parts = text.split(' ');
   const cmd = parts[0];
-
   if (cmd === '/ban') {
     const target = parts[1];
     if (!target) { await ctx.reply('Использование: /ban <userId>'); return; }
@@ -869,6 +773,16 @@ async function handleAdminCommand(ctx, text) {
 Комиссия / Commission: ${[...orders.values()].filter(o=>o.status==='completed').reduce((a,o)=>a+(o.commission||0),0)}
 Реальных пополнений / Topups: ${transactions.filter(t=>t.type==='topup').length}
 Приглашений / Referrals: ${[...referralCount.values()].reduce((a,b)=>a+b,0)}`);
+  } else if (cmd === '/gift') {
+    const target = parts[1];
+    const amount = parseInt(parts[2]);
+    const title = parts[3];
+    if (!target || !amount) { await ctx.reply('Использование: /gift <userId> <coins> [titleId]'); return; }
+    addCoins(target, amount);
+    if (title) { const owned = ownedTitles.get(String(target)) || new Set(); owned.add(title); ownedTitles.set(String(target), owned); }
+    addMail(target, { text: `Подарок от администратора`, gift: title ? 'Титул + монеты' : 'Монеты', giftCoins: amount, giftTitle: title || null, at: Date.now() });
+    saveState();
+    await ctx.reply(`🎁 Подарок отправлен ${target}: ${amount}🪙 ${title || ''}`);
   }
 }
 
@@ -880,246 +794,274 @@ bot.command('addadmin', async (ctx) => { if (isMainAdmin(ctx.from.id)) await han
 bot.command('removeadmin', async (ctx) => { if (isMainAdmin(ctx.from.id)) await handleAdminCommand(ctx, ctx.message.text); });
 bot.command('listadmins', async (ctx) => { if (isAdmin(ctx.from.id)) await handleAdminCommand(ctx, ctx.message.text); });
 bot.command('stats', async (ctx) => { if (isAdmin(ctx.from.id)) await handleAdminCommand(ctx, ctx.message.text); });
-bot.command('news', async (ctx) => { if (isAdmin(ctx.from.id)) { const text = ctx.message.text.replace('/news', '').trim(); if (!text) { await ctx.reply('Использование: /news <текст>'); return; } news.push({ title: 'Новость', text, at: Date.now() }); saveState(); await ctx.reply('✅ Новость опубликована. / News published.'); for (const u of users) { try { await bot.telegram.sendMessage(u, `📰 Новая новость / New news:\n\n${text}`); } catch (e) {} } } });
-
-// ---- Mini App ----
-bot.action('miniapp', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  const webappUrl = 'https://t.me/' + (bot.botInfo && bot.botInfo.username ? bot.botInfo.username : '');
-  await ctx.reply('📱 Mini App дашборд:\nОткрой в браузере: /workspace/webapp/index.html\n\nИли используй команды бота для управления.', mainMenu(uid));
+bot.command('news', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+  const text = ctx.message.text.replace('/news', '').trim();
+  if (!text) { await ctx.reply('Использование: /news <текст>'); return; }
+  news.push({ title: 'Новость / News', text, at: Date.now() });
+  saveState();
+  await ctx.reply('✅ Новость опубликована. / News published.');
+  for (const u of users) { try { await bot.telegram.sendMessage(u, `📰 Новая новость / New news:\n\n${text}`); } catch (e) {} }
 });
 
-// ---- Fishing ----
-bot.action('fishing', async (ctx) => {
-  await ctx.answerCbQuery();
+// ---- Text handler ----
+bot.on('text', async (ctx) => {
   const uid = ctx.from.id;
-  if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены.'); return; }
-  const last = fishingCooldown.get(String(uid)) || 0;
-  const now = Date.now();
-  const cd = 12 * 60 * 60 * 1000; // 12 hours
-  if (now - last < cd) {
-    const remaining = Math.ceil((cd - (now - last)) / 1000 / 60);
-    await ctx.reply(`🎣 Рыбалка на кулдауне. Осталось ${remaining} мин.\nFishing on cooldown. ${remaining} min left.`, mainMenu(uid));
+  if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены. / Banned.'); return; }
+  const state = userState.get(uid);
+  const text = ctx.message.text;
+
+  if (state && state.mode === 'create_desc') {
+    state.description = text;
+    state.mode = 'create_amount';
+    userState.set(uid, state);
+    await editPrompt(uid, '⭐ Сколько звёзд/монет заплатить за заказ? (число) / How many stars/coins?', backKeyboard(uid));
     return;
   }
-  const fish = rollFish();
-  fishingCooldown.set(String(uid), now);
-  if (!userFish.has(String(uid))) userFish.set(String(uid), []);
-  userFish.get(String(uid)).push({ ...fish, caughtAt: Date.now() });
-  saveState();
-  await ctx.reply(`🎣 Ты поймал: ${fish.emoji} ${fish.name} (${fish.rarity})!\nЦенность: ${fish.value} 🪙\n\nКД: 12 часов. / Cooldown: 12h.`, Markup.inlineKeyboard([
-    [Markup.button.callback('📦 Инвентарь / Inventory', 'fish_inventory')],
-    [Markup.button.callback('💰 Аукцион / Auction', 'auction_list')],
-    [Markup.button.callback(t(uid, 'back'), 'back_main')],
-  ]));
-});
 
-bot.action('fish_inventory', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  const fish = userFish.get(String(uid)) || [];
-  if (fish.length === 0) { await ctx.reply('📦 Инвентарь пуст. / Inventory empty.', mainMenu(uid)); return; }
-  let text = '📦 Твой улов / Your catch:\n\n';
-  const counts = {};
-  fish.forEach(f => { counts[f.name] = (counts[f.name] || 0) + 1; });
-  for (const [name, count] of Object.entries(counts)) {
-    const f = fish.find(x => x.name === name);
-    text += `${f.emoji} ${name} (${f.rarity}) x${count} — ${f.value} 🪙\n`;
+  if (state && state.mode === 'create_amount') {
+    const n = parseInt(text);
+    if (!n || n <= 0) { await editPrompt(uid, '❌ Введи положительное число. / Enter positive number.', backKeyboard(uid)); return; }
+    state.amount = n;
+    state.mode = 'create_currency';
+    userState.set(uid, state);
+    await editPrompt(uid, 'Выбери валюту заказа: / Choose order currency:', Markup.inlineKeyboard([
+      [Markup.button.callback('⭐ Звёзды / Stars', 'order_currency_stars')],
+      [Markup.button.callback('🪙 Монеты / Coins', 'order_currency_coins')],
+      [Markup.button.callback(t(uid, 'back'), 'back_main')],
+    ]));
+    return;
   }
-  await ctx.reply(text, Markup.inlineKeyboard([
-    [Markup.button.callback('💰 Выставить на аукцион / Auction', 'auction_sell')],
-    [Markup.button.callback(t(uid, 'back'), 'back_main')],
-  ]));
+
+  if (state && state.mode === 'submit') {
+    const order = orders.get(state.orderId);
+    if (!order) { userState.delete(uid); await editPrompt(uid, '❌ Заказ не найден. / Order not found.', mainMenu(uid)); return; }
+    order.submissions.push({ type: 'text', content: text, from: String(uid), at: Date.now() });
+    order.status = 'completed';
+    userState.delete(uid);
+    if (order.currency === 'coins') addCoins(uid, order.payout); else addStars(uid, order.payout);
+    addCoins(uid, 1);
+    incCompletedOrders(uid);
+    transactions.push({ uid: String(uid), amount: order.payout, type: 'payout', orderId: order.id, at: Date.now() });
+    saveState();
+    await editPrompt(uid, `✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${order.payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1 🪙`, mainMenu(uid));
+    try { await bot.telegram.sendMessage(order.creatorId, `✅ Заказ #${order.id} выполнен!\n\nРезультат:\n${text}\n🔗 ${orderLink(order.id)}`); } catch (e) {}
+    try { await bot.telegram.sendMessage(MAIN_ADMIN, `✅ Заказ #${order.id} выполнен. Исполнитель получил ${order.payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1🪙`); } catch (e) {}
+    return;
+  }
+
+  if (state && state.mode === 'video_title') {
+    state.title = text;
+    state.mode = 'video_desc';
+    userState.set(uid, state);
+    await editPrompt(uid, '🎬 Введи описание видео: / Enter video description:', backKeyboard(uid));
+    return;
+  }
+  if (state && state.mode === 'video_desc') {
+    const id = nextVideoId++;
+    videos.set(id, { id, title: state.title, description: text, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now() });
+    saveState();
+    userState.delete(uid);
+    await editPrompt(uid, `✅ Видео "${state.title}" создано! / Video created!`, mainMenu(uid));
+    return;
+  }
+
+  if (state && state.mode === 'video_search') {
+    const q = text.toLowerCase();
+    const results = [...videos.values()].filter(v => v.title.toLowerCase().includes(q));
+    userState.delete(uid);
+    if (results.length === 0) { await editPrompt(uid, '🔍 Ничего не найдено. / Nothing found.', mainMenu(uid)); return; }
+    const buttons = results.map(v => [Markup.button.callback(`${v.title} (${v.invested || 0}🪙)`, `view_video_${v.id}`)]);
+    buttons.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
+    await editPrompt(uid, '🔍 Результаты поиска / Search results:', Markup.inlineKeyboard(buttons));
+    return;
+  }
+
+  if (state && state.mode === 'invest_amount') {
+    const n = parseInt(text);
+    if (!n || n <= 0) { await editPrompt(uid, '❌ Введи число. / Enter number.', backKeyboard(uid)); return; }
+    if (getCoins(uid) < n) { await editPrompt(uid, `❌ Недостаточно монет. У тебя ${getCoins(uid)} 🪙. / Not enough coins.`, backKeyboard(uid)); return; }
+    const video = videos.get(state.videoId);
+    if (!video) { userState.delete(uid); await editPrompt(uid, '❌ Видео не найдено. / Video not found.', mainMenu(uid)); return; }
+    addCoins(uid, -n);
+    video.invested = (video.invested || 0) + n;
+    addInvested(uid, n);
+    saveState();
+    userState.delete(uid);
+    await editPrompt(uid, `✅ Инвестировано ${n} 🪙 в "${video.title}"! / Invested ${n} coins!`, mainMenu(uid));
+    return;
+  }
+
+  if (state && state.mode === 'donate_target') {
+    const target = text.trim();
+    if (target === String(uid)) { await editPrompt(uid, '❌ Нельзя донатить себе. / Cannot donate to yourself.', mainMenu(uid)); userState.delete(uid); return; }
+    userState.set(uid, { ...state, mode: 'donate_amount', target, promptMsgId: state.promptMsgId, chatId: state.chatId });
+    await editPrompt(uid, '💰 Сколько монет донатить? / How many coins to donate?', backKeyboard(uid));
+    return;
+  }
+
+  if (state && state.mode === 'donate_amount') {
+    const n = parseInt(text);
+    if (!n || n <= 0) { await editPrompt(uid, '❌ Введи число. / Enter number.', backKeyboard(uid)); return; }
+    if (getCoins(uid) < n) { await editPrompt(uid, `❌ Недостаточно монет. У тебя ${getCoins(uid)} 🪙. / Not enough coins.`, backKeyboard(uid)); return; }
+    const target = state.target;
+    addCoins(uid, -n);
+    addCoins(target, n);
+    saveState();
+    userState.delete(uid);
+    await editPrompt(uid, `✅ Донат ${n} 🪙 отправлен пользователю ${target}! / Donated ${n} coins to ${target}!`, mainMenu(uid));
+    try { await bot.telegram.sendMessage(target, `💰 Тебе донатили ${n} 🪙 от пользователя ${uid}!`); } catch (e) {}
+    return;
+  }
+
+  if (state && state.mode === 'profile_view') {
+    userState.delete(uid);
+    const target = text.trim();
+    if (target === MAIN_ADMIN) { await editPrompt(uid, '🔒 Профиль администратора скрыт. / Admin profile is hidden.', mainMenu(uid)); return; }
+    const title = activeTitle.get(target) || 'Нет титула';
+    const fishCount = getFish(target).length;
+    const videoCount = [...videos.values()].filter(v => v.creatorId === target).length;
+    await editPrompt(uid, `👤 Профиль #${target}\n\n⭐ Звёзды: ${getStars(target)}\n🪙 Монеты: ${getCoins(target)}\n🏷️ Титул: ${title}\n🎣 Рыб: ${fishCount}\n📺 Видео: ${videoCount}\n🤝 Приглашено: ${referralCount.get(target) || 0}`, Markup.inlineKeyboard([
+      [Markup.button.callback('💰 Донатить / Donate', `donate_to_${target}`)],
+      [Markup.button.callback(t(uid, 'back'), 'back_main')],
+    ]));
+    return;
+  }
+
+  if (state && state.mode === 'auction_price') {
+    const n = parseInt(text);
+    if (!n || n <= 0) { await editPrompt(uid, '❌ Введи число. / Enter number.', backKeyboard(uid)); return; }
+    const fish = state.fish;
+    if (!fish) { userState.delete(uid); await editPrompt(uid, '❌ Нет рыбы. / No fish.', mainMenu(uid)); return; }
+    const fishList = state.fishList || getFish(uid);
+    const idx = fishList.indexOf(fish);
+    if (idx >= 0) { fishList.splice(idx, 1); userFish.set(String(uid), fishList); }
+    const id = nextAuctionId++;
+    auction.set(id, { id, fish, price: n, sellerId: String(uid), status: 'open', createdAt: Date.now() });
+    saveState();
+    userState.delete(uid);
+    await editPrompt(uid, `✅ Рыба ${fish.emoji} ${fish.name} выставлена на аукцион за ${n}⭐! / Fish listed for ${n} stars!`, mainMenu(uid));
+    return;
+  }
+
+  if (isAdmin(uid) && text.startsWith('/')) {
+    await handleAdminCommand(ctx, text);
+    return;
+  }
+
+  await ctx.reply(menuText(uid), mainMenu(uid));
 });
 
-// ---- Auction ----
-bot.action('auction_list', async (ctx) => {
-  await ctx.answerCbQuery();
+// ---- Media handler ----
+async function handleMedia(ctx, type) {
   const uid = ctx.from.id;
-  const items = [...auction.values()].filter(a => a.status === 'open');
-  if (items.length === 0) { await ctx.reply('💰 Аукцион пуст. / Auction empty.', mainMenu(uid)); return; }
-  const buttons = items.map(a => [Markup.button.callback(`#${a.id} ${a.fish.emoji} ${a.fish.name} — ${a.price}⭐`, `bid_${a.id}`)]);
-  buttons.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
-  await ctx.reply('💰 Аукцион / Auction:', Markup.inlineKeyboard(buttons));
-});
+  const state = userState.get(uid);
+  if (!state || state.mode !== 'submit') return false;
+  const order = orders.get(state.orderId);
+  if (!order) { userState.delete(uid); await editPrompt(uid, '❌ Заказ не найден. / Order not found.', mainMenu(uid)); return true; }
 
-bot.action('auction_sell', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  const fish = userFish.get(String(uid)) || [];
-  if (fish.length === 0) { await ctx.reply('❌ Нет рыбы для продажи. / No fish to sell.'); return; }
-  userState.set(uid, { mode: 'auction_price', fish });
-  await ctx.reply('💰 Введи цену в звёздах для выставления рыбы на аукцион: / Enter price in stars:');
-});
+  let fileId = null;
+  if (type === 'photo') fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+  else if (type === 'video') fileId = ctx.message.video.file_id;
+  else if (type === 'document') fileId = ctx.message.document.file_id;
 
-bot.action(/^bid_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  const id = parseInt(ctx.match[1]);
-  const item = auction.get(id);
-  if (!item || item.status !== 'open') { await ctx.reply('❌ Лот недоступен. / Lot unavailable.'); return; }
-  if (item.sellerId === String(uid)) { await ctx.reply('❌ Нельзя купить свой лот. / Cannot buy own lot.'); return; }
-  if (getStars(uid) < item.price) { await ctx.reply(`❌ Недостаточно звёзд. Нужно ${item.price}⭐. / Not enough stars.`); return; }
-  addStars(uid, -item.price);
-  addCoins(item.sellerId, item.fish.value); // seller gets coins 1:1
-  item.status = 'sold';
-  item.buyerId = String(uid);
+  const caption = ctx.message.caption || '';
+  order.submissions.push({ type, fileId, caption, from: String(uid), at: Date.now() });
+  order.status = 'completed';
+  userState.delete(uid);
+  if (order.currency === 'coins') addCoins(uid, order.payout); else addStars(uid, order.payout);
+  addCoins(uid, 1);
+  incCompletedOrders(uid);
+  transactions.push({ uid: String(uid), amount: order.payout, type: 'payout', orderId: order.id, at: Date.now() });
   saveState();
-  await ctx.reply(`✅ Куплено: ${item.fish.emoji} ${item.fish.name} за ${item.price}⭐!\nПродавец получил ${item.fish.value} 🪙`, mainMenu(uid));
-  try { await bot.telegram.sendMessage(item.sellerId, `💰 Твоя рыба ${item.fish.emoji} ${item.fish.name} продана за ${item.price}⭐! Ты получил ${item.fish.value} 🪙`); } catch (e) {}
-});
+  await editPrompt(uid, `✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${order.payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1 🪙`, mainMenu(uid));
 
-// ---- Internet (video platform) ----
-bot.action('internet', async (ctx) => {
+  try {
+    if (type === 'photo') await bot.telegram.sendPhoto(order.creatorId, fileId, { caption: `✅ Заказ #${order.id} выполнен!\n${caption}\n🔗 ${orderLink(order.id)}` });
+    else if (type === 'video') await bot.telegram.sendVideo(order.creatorId, fileId, { caption: `✅ Заказ #${order.id} выполнен!\n${caption}\n🔗 ${orderLink(order.id)}` });
+    else await bot.telegram.sendDocument(order.creatorId, fileId, { caption: `✅ Заказ #${order.id} выполнен!\n${caption}\n🔗 ${orderLink(order.id)}` });
+  } catch (e) {}
+  try { await bot.telegram.sendMessage(MAIN_ADMIN, `✅ Заказ #${order.id} выполнен (${type}).`); } catch (e) {}
+  return true;
+}
+
+bot.on('photo', async (ctx) => { if (!(await handleMedia(ctx, 'photo'))) await ctx.reply(menuText(ctx.from.id), mainMenu(ctx.from.id)); });
+bot.on('video', async (ctx) => { if (!(await handleMedia(ctx, 'video'))) await ctx.reply(menuText(ctx.from.id), mainMenu(ctx.from.id)); });
+bot.on('document', async (ctx) => { if (!(await handleMedia(ctx, 'document'))) await ctx.reply(menuText(ctx.from.id), mainMenu(ctx.from.id)); });
+
+// ---- Order currency callbacks ----
+bot.action('order_currency_stars', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
-  await ctx.reply('🛒 Интернет / Internet\n\nВыбери действие:', Markup.inlineKeyboard([
-    [Markup.button.callback('📺 Смотреть видео / Watch', 'video_list')],
-    [Markup.button.callback('🎬 Создать видео / Create', 'video_create')],
-    [Markup.button.callback('🔍 Поиск / Search', 'video_search')],
-    [Markup.button.callback(t(uid, 'back'), 'back_main')],
-  ]));
-});
-
-bot.action('video_list', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  const list = [...videos.values()].sort((a, b) => (b.invested || 0) - (a.invested || 0)).slice(0, 10);
-  if (list.length === 0) { await ctx.reply('📺 Видео пока нет. / No videos yet.', mainMenu(uid)); return; }
-  const buttons = list.map(v => [Markup.button.callback(`${v.title} (${v.invested || 0}🪙)`, `view_video_${v.id}`)]);
-  buttons.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
-  await ctx.reply('📺 Рекомендации / Recommendations:', Markup.inlineKeyboard(buttons));
-});
-
-bot.action('video_create', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  userState.set(uid, { mode: 'video_title' });
-  await ctx.reply('🎬 Введи название видео: / Enter video title:');
-});
-
-bot.action('video_search', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  userState.set(uid, { mode: 'video_search' });
-  await ctx.reply('🔍 Введи название для поиска: / Enter search query:');
-});
-
-bot.action(/^view_video_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  const id = parseInt(ctx.match[1]);
-  const video = videos.get(id);
-  if (!video) { await ctx.reply('❌ Видео не найдено. / Video not found.'); return; }
-  await ctx.reply(`📺 ${video.title}\n\nАвтор: ${video.creatorName}\nИнвестиций: ${video.invested || 0} 🪙\n\n${video.description || ''}`, Markup.inlineKeyboard([
-    [Markup.button.callback('💰 Инвестировать / Invest', `invest_${id}`)],
-    [Markup.button.callback('👤 Профиль автора / Author profile', `profile_view_${video.creatorId}`)],
-    [Markup.button.callback(t(uid, 'back'), 'back_main')],
-  ]));
-});
-
-bot.action(/^invest_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  const id = parseInt(ctx.match[1]);
-  const video = videos.get(id);
-  if (!video) return;
-  userState.set(uid, { mode: 'invest_amount', videoId: id });
-  await ctx.reply('💰 Сколько монет инвестировать? / How many coins to invest?');
-});
-
-// ---- News ----
-bot.action('news', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  if (news.length === 0) { await ctx.reply('📰 Новостей пока нет. / No news yet.', mainMenu(uid)); return; }
-  let text = '📰 Новости / News:\n\n';
-  news.slice(-10).reverse().forEach(n => {
-    text += `📌 ${n.title}\n${n.text}\n— ${new Date(n.at).toLocaleDateString('ru-RU')}\n\n`;
-  });
-  await ctx.reply(text, mainMenu(uid));
-});
-
-// ---- Donate ----
-bot.action('donate', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  userState.set(uid, { mode: 'donate_target' });
-  await ctx.reply('💰 Введи ID пользователя для доната игровой валюты: / Enter user ID to donate coins:');
-});
-
-// ---- Mail ----
-bot.action('mail', async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  const messages = mail.get(String(uid)) || [];
-  if (messages.length === 0) { await ctx.reply('📧 Почта пуста. / Mailbox empty.', mainMenu(uid)); return; }
-  let text = '📧 Твоя почта / Your mail:\n\n';
-  messages.slice(-20).reverse().forEach((m, i) => {
-    text += `${i + 1}. ${m.text || 'Подарок'} ${m.gift ? `🎁 ${m.gift}` : ''}\n`;
-    if (m.gift) { addCoins(uid, m.giftCoins || 0); if (m.giftTitle) { const owned = ownedTitles.get(String(uid)) || new Set(); owned.add(m.giftTitle); ownedTitles.set(String(uid), owned); } }
-  });
-  mail.set(String(uid), []);
+  const st = userState.get(uid);
+  if (!st || st.mode !== 'create_currency') { await editMsg(ctx, menuText(uid), mainMenu(uid)); return; }
+  if (getStars(uid) < st.amount) {
+    userState.delete(uid);
+    await editMsg(ctx, `❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐. Пополни реально: /pay ${st.amount - getStars(uid)}`, mainMenu(uid));
+    return;
+  }
+  const commission = Math.ceil(st.amount * COMMISSION);
+  const payout = st.amount - commission;
+  addStars(uid, -st.amount);
+  const id = genId();
+  orders.set(id, { id, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', description: st.description, amount: st.amount, currency: 'stars', stars: st.amount, commission, payout, status: 'open', takerId: null, submissions: [], createdAt: Date.now(), link: orderLink(id) });
   saveState();
-  await ctx.reply(text, mainMenu(uid));
+  userState.delete(uid);
+  await editMsg(ctx, `✅ Заказ #${id} создан!\n\n${st.description}\n⭐ ${st.amount} звёзд (комиссия 5% = ${commission}⭐)\n🔗 Ссылка: ${orderLink(id)}\n\nОпубликован. / Created.`, mainMenu(uid));
+  try { await bot.telegram.sendMessage(MAIN_ADMIN, `📋 Новый заказ #${id} от ${ctx.from.first_name}: ${st.description} (${st.amount}⭐)\n🔗 ${orderLink(id)}`); } catch (e) {}
 });
 
-// ---- Profile ----
-bot.action('profile', async (ctx) => {
+bot.action('order_currency_coins', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
-  const title = activeTitle.get(String(uid)) || 'Нет титула';
-  const fishCount = (userFish.get(String(uid)) || []).length;
-  const videoCount = [...videos.values()].filter(v => v.creatorId === String(uid)).length;
-  await ctx.reply(`👤 Профиль / Profile\n\nID: ${uid}\n⭐ Звёзды: ${getStars(uid)}\n🪙 Монеты: ${getCoins(uid)}\n🏷️ Титул: ${title}\n🎣 Рыб поймано: ${fishCount}\n📺 Видео: ${videoCount}\n🤝 Приглашено: ${referralCount.get(String(uid)) || 0}`, Markup.inlineKeyboard([
-    [Markup.button.callback('🔍 Посмотреть профиль другого / View other', 'profile_view_other')],
-    [Markup.button.callback(t(uid, 'back'), 'back_main')],
-  ]));
+  const st = userState.get(uid);
+  if (!st || st.mode !== 'create_currency') { await editMsg(ctx, menuText(uid), mainMenu(uid)); return; }
+  if (getCoins(uid) < st.amount) {
+    userState.delete(uid);
+    await editMsg(ctx, `❌ Недостаточно монет. Баланс: ${getCoins(uid)} 🪙.`, mainMenu(uid));
+    return;
+  }
+  const commission = Math.ceil(st.amount * COMMISSION);
+  const payout = st.amount - commission;
+  addCoins(uid, -st.amount);
+  const id = genId();
+  orders.set(id, { id, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', description: st.description, amount: st.amount, currency: 'coins', stars: 0, commission, payout, status: 'open', takerId: null, submissions: [], createdAt: Date.now(), link: orderLink(id) });
+  saveState();
+  userState.delete(uid);
+  await editMsg(ctx, `✅ Заказ #${id} создан!\n\n${st.description}\n🪙 ${st.amount} монет (комиссия 5% = ${commission}🪙)\n🔗 Ссылка: ${orderLink(id)}\n\nОпубликован. / Created.`, mainMenu(uid));
+  try { await bot.telegram.sendMessage(MAIN_ADMIN, `📋 Новый заказ #${id} от ${ctx.from.first_name}: ${st.description} (${st.amount}🪙)\n🔗 ${orderLink(id)}`); } catch (e) {}
 });
 
-bot.action('profile_view_other', async (ctx) => {
-  await ctx.answerCbQuery();
+// ---- Real Stars payment ----
+bot.command('pay', async (ctx) => {
   const uid = ctx.from.id;
-  userState.set(uid, { mode: 'profile_view' });
-  await ctx.reply('🔍 Введи ID пользователя: / Enter user ID:');
+  const parts = ctx.message.text.split(' ');
+  const amount = parseInt(parts[1]);
+  if (!amount || amount <= 0) { await ctx.reply('Использование: /pay <сумма в звёздах> / Usage: /pay <amount>'); return; }
+  await ctx.replyWithInvoice({
+    title: 'Пополнение баланса / Top up',
+    description: `Пополнение на ${amount} Telegram Stars`,
+    payload: `topup_${uid}_${amount}_${Date.now()}`,
+    currency: 'XTR',
+    prices: [{ label: 'Telegram Stars', amount }],
+    provider_token: '',
+  });
 });
 
-bot.action(/^donate_to_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
+bot.on('pre_checkout_query', async (ctx) => {
+  await ctx.answerPreCheckoutQuery(true);
+});
+
+bot.on('successful_payment', async (ctx) => {
   const uid = ctx.from.id;
-  const target = ctx.match[1];
-  userState.set(uid, { mode: 'donate_target', preTarget: target });
-  // override: directly ask amount
-  userState.set(uid, { mode: 'donate_amount', target });
-  await ctx.reply(`💰 Сколько монет донатить пользователю ${target}? / How many coins to donate to ${target}?`);
+  const payment = ctx.message.successful_payment;
+  const amount = payment.total_amount;
+  addStars(uid, amount);
+  transactions.push({ uid: String(uid), amount, type: 'topup', at: Date.now(), chargeId: payment.telegram_payment_charge_id });
+  saveState();
+  await ctx.reply(`✅ Баланс пополнен на ${amount} ⭐\n💰 Текущий баланс: ${getStars(uid)} ⭐`, mainMenu(uid));
+  try { await bot.telegram.sendMessage(MAIN_ADMIN, `💰 Реальное пополнение: ${ctx.from.first_name} (${uid}) +${amount}⭐`); } catch (e) {}
 });
-
-bot.action(/^profile_view_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  const target = ctx.match[1];
-  if (target === MAIN_ADMIN) { await ctx.reply('🔒 Профиль администратора скрыт. / Admin profile is hidden.'); return; }
-  const title = activeTitle.get(target) || 'Нет титула';
-  const fishCount = (userFish.get(target) || []).length;
-  const videoCount = [...videos.values()].filter(v => v.creatorId === target).length;
-  await ctx.reply(`👤 Профиль #${target}\n\n⭐ Звёзды: ${getStars(target)}\n🪙 Монеты: ${getCoins(target)}\n🏷️ Титул: ${title}\n🎣 Рыб: ${fishCount}\n📺 Видео: ${videoCount}\n🤝 Приглашено: ${referralCount.get(target) || 0}`, Markup.inlineKeyboard([
-    [Markup.button.callback('💰 Донатить / Donate', `donate_to_${target}`)],
-    [Markup.button.callback(t(uid, 'back'), 'back_main')],
-  ]));
-});
-
-// ---- Text handler additions (insert before bot.launch) ----
-// We'll patch the existing text handler by adding cases via a wrapper approach
-// Instead, add new modes handling by overriding: patch bot.on('text') is already registered,
-// so we add a separate listener that runs first? Telegraf runs in order; our new listener
-// registered now would run AFTER. Better: we modify existing handler. Use a trick: register
-// a middleware-like handler before. Since bot.on('text') already registered above, we can't
-// easily prepend. Instead, we handle new modes inside existing handler by editing it.
-
-// We'll add handling via a new command approach: register bot.on('text') again won't help.
-// So instead, let's just add the missing mode handling by editing the existing text handler
-// through string replacement below.
 
 bot.launch();
 console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
