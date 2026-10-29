@@ -1,0 +1,200 @@
+const { Telegraf, Markup } = require('telegraf');
+
+const BOT_TOKEN = process.env.BOT_TOKEN || '9228974259:AAE5v1pBy4P4L7ksSqwAZOltDyY2AopATvY';
+const MY_USER_ID = '7774448780';
+
+const bot = new Telegraf(BOT_TOKEN);
+
+// ---- In-memory stores ----
+const orders = new Map(); // orderId -> order
+let nextOrderId = 1;
+const userState = new Map(); // userId -> { mode, orderId, ... }
+const userStars = new Map(); // userId -> number (virtual balance)
+
+function getStars(uid) { return userStars.get(uid) || 0; }
+function addStars(uid, n) { userStars.set(uid, getStars(uid) + n); }
+
+function genId() { return nextOrderId++; }
+
+function mainMenu() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('📋 Заказать', 'order_create')],
+    [Markup.button.callback('⚡ Выполнить', 'order_list')],
+    [Markup.button.callback('💰 Баланс', 'balance')],
+  ]);
+}
+
+// ---- Start ----
+bot.start(async (ctx) => {
+  const uid = ctx.from.id;
+  await ctx.reply('👋 Привет! Выбирай действие:', mainMenu());
+});
+
+// ---- Callbacks (fast: answer immediately) ----
+bot.action('order_create', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  userState.set(uid, { mode: 'create_desc' });
+  await ctx.reply('✏️ Опиши, что нужно сделать (текст заказа):');
+});
+
+bot.action('order_list', async (ctx) => {
+  await ctx.answerCbQuery();
+  const open = [...orders.values()].filter(o => o.status === 'open');
+  if (open.length === 0) {
+    await ctx.reply('📭 Нет открытых заказов.', mainMenu());
+    return;
+  }
+  const buttons = open.map(o =>
+    [Markup.button.callback(`#${o.id} — ${o.stars}⭐ ${o.description.slice(0, 30)}`, `take_${o.id}`)]
+  );
+  buttons.push([Markup.button.callback('⬅️ Назад', 'back_main')]);
+  await ctx.reply('⚡ Открытые заказы:', Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^take_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const orderId = parseInt(ctx.match[1]);
+  const order = orders.get(orderId);
+  if (!order || order.status !== 'open') {
+    await ctx.reply('❌ Заказ недоступен.');
+    return;
+  }
+  const uid = ctx.from.id;
+  if (order.creatorId === uid) {
+    await ctx.reply('❌ Нельзя брать свой заказ.');
+    return;
+  }
+  order.status = 'taken';
+  order.takerId = uid;
+  userState.set(uid, { mode: 'submit', orderId });
+  await ctx.reply(`✅ Взял заказ #${orderId}\n\n${order.description}\n\n⭐ ${order.stars} звёзд\n\nОтправь результат (текст/фото/видео/файл):`);
+});
+
+bot.action('back_main', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply('Главное меню:', mainMenu());
+});
+
+bot.action('balance', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  await ctx.reply(`💰 Твой баланс: ${getStars(uid)} ⭐`);
+});
+
+// ---- Text handler (orders creation + submission) ----
+bot.on('text', async (ctx) => {
+  const uid = ctx.from.id;
+  const state = userState.get(uid);
+  const text = ctx.message.text;
+
+  // Creating order: description
+  if (state && state.mode === 'create_desc') {
+    state.description = text;
+    state.mode = 'create_amount';
+    userState.set(uid, state);
+    await ctx.reply('⭐ Сколько звёзд заплатить за заказ? (число)');
+    return;
+  }
+
+  // Creating order: amount
+  if (state && state.mode === 'create_amount') {
+    const n = parseInt(text);
+    if (!n || n <= 0) {
+      await ctx.reply('❌ Введи положительное число.');
+      return;
+    }
+    if (getStars(uid) < n) {
+      await ctx.reply(`❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐`);
+      userState.delete(uid);
+      await ctx.reply('Главное меню:', mainMenu());
+      return;
+    }
+    addStars(uid, -n);
+    const id = genId();
+    orders.set(id, {
+      id,
+      creatorId: uid,
+      creatorName: ctx.from.first_name || 'User',
+      description: state.description,
+      stars: n,
+      status: 'open',
+      takerId: null,
+      submissions: [],
+      createdAt: Date.now(),
+    });
+    userState.delete(uid);
+    await ctx.reply(`✅ Заказ #${id} создан и опубликован!\n\n${state.description}\n⭐ ${n} звёзд`, mainMenu());
+    // notify admin
+    try { await bot.telegram.sendMessage(MY_USER_ID, `📋 Новый заказ #${id} от ${ctx.from.first_name}: ${state.description} (${n}⭐)`); } catch (e) {}
+    return;
+  }
+
+  // Submitting work
+  if (state && state.mode === 'submit') {
+    const order = orders.get(state.orderId);
+    if (!order) { userState.delete(uid); await ctx.reply('❌ Заказ не найден.', mainMenu()); return; }
+    order.submissions.push({ type: 'text', content: text, from: uid, at: Date.now() });
+    order.status = 'completed';
+    userState.delete(uid);
+    // pay taker
+    addStars(uid, order.stars);
+    await ctx.reply(`✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${order.stars} ⭐`, mainMenu());
+    try { await bot.telegram.sendMessage(order.creatorId, `✅ Заказ #${order.id} выполнен!\n\nРезультат:\n${text}`); } catch (e) {}
+    try { await bot.telegram.sendMessage(MY_USER_ID, `✅ Заказ #${order.id} выполнен пользователем ${ctx.from.first_name}`); } catch (e) {}
+    return;
+  }
+
+  // default
+  await ctx.reply('Используй кнопки меню:', mainMenu());
+});
+
+// ---- Media handler ----
+async function handleMedia(ctx, type) {
+  const uid = ctx.from.id;
+  const state = userState.get(uid);
+  if (!state || state.mode !== 'submit') return false;
+  const order = orders.get(state.orderId);
+  if (!order) { userState.delete(uid); await ctx.reply('❌ Заказ не найден.', mainMenu()); return true; }
+
+  let fileId = null;
+  if (type === 'photo') fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+  else if (type === 'video') fileId = ctx.message.video.file_id;
+  else if (type === 'document') fileId = ctx.message.document.file_id;
+
+  const caption = ctx.message.caption || '';
+  order.submissions.push({ type, fileId, caption, from: uid, at: Date.now() });
+  order.status = 'completed';
+  userState.delete(uid);
+  addStars(uid, order.stars);
+  await ctx.reply(`✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${order.stars} ⭐`, mainMenu());
+
+  try {
+    if (type === 'photo') await bot.telegram.sendPhoto(order.creatorId, fileId, { caption: `✅ Заказ #${order.id} выполнен!\n${caption}` });
+    else if (type === 'video') await bot.telegram.sendVideo(order.creatorId, fileId, { caption: `✅ Заказ #${order.id} выполнен!\n${caption}` });
+    else await bot.telegram.sendDocument(order.creatorId, fileId, { caption: `✅ Заказ #${order.id} выполнен!\n${caption}` });
+  } catch (e) {}
+  try { await bot.telegram.sendMessage(MY_USER_ID, `✅ Заказ #${order.id} выполнен (${type}) пользователем ${ctx.from.first_name}`); } catch (e) {}
+  return true;
+}
+
+bot.on('photo', async (ctx) => { if (!(await handleMedia(ctx, 'photo'))) await ctx.reply('Используй кнопки меню:', mainMenu()); });
+bot.on('video', async (ctx) => { if (!(await handleMedia(ctx, 'video'))) await ctx.reply('Используй кнопки меню:', mainMenu()); });
+bot.on('document', async (ctx) => { if (!(await handleMedia(ctx, 'document'))) await ctx.reply('Используй кнопки меню:', mainMenu()); });
+
+// Admin: add stars
+bot.command('addstars', async (ctx) => {
+  if (ctx.from.id.toString() !== MY_USER_ID) return;
+  const parts = ctx.message.text.split(' ');
+  const uid = parts[1];
+  const n = parseInt(parts[2]);
+  if (!uid || !n) { await ctx.reply('Использование: /addstars <userId> <amount>'); return; }
+  addStars(parseInt(uid), n);
+  await ctx.reply(`✅ Добавлено ${n}⭐ пользователю ${uid}`);
+});
+
+bot.launch();
+console.log('🚀 Бот запущен...');
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
