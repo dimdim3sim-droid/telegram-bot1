@@ -116,12 +116,14 @@ const AGREEMENT = `📜 Пользовательское соглашение / 
 
 1. Сервис — площадка для заказов и выполнения работ за Telegram Stars.
 2. Комиссия сервиса — 5% от суммы заказа.
-3. Исполнитель обязуется выполнить заказ качественно.
-4. Оплата только реальными Telegram Stars.
-5. Запрещены мошенничество, спам, незаконный контент.
-6. Администрация может забанить/ограничить пользователя.
-7. Споры разрешаются администрацией.
-8. Игровая валюта (монеты) зарабатывается за задания.`;
+3. Исполнитель обязуется выполнить заказ качественно и в срок.
+4. Оплата только реальными Telegram Stars, без возвратов после выполнения.
+5. Запрещены мошенничество, спам, оскорбления, незаконный контент.
+6. Администрация вправе забанить/ограничить пользователя при нарушении правил.
+7. Споры разрешаются администрацией добросовестно.
+8. Игровая валюта (монеты) зарабатывается за задания и выполнение заказов.
+9. Пользователь несёт ответственность за свои действия на платформе.
+10. Используя бота, вы соглашаетесь с условиями.`;
 
 function getLang(uid) { return userLang.get(String(uid)) || 'ru'; }
 function setLang(uid, l) { userLang.set(String(uid), l); saveState(); }
@@ -243,7 +245,8 @@ function mainMenu(uid) {
   const rows = [
     [Markup.button.callback(t(uid, 'order'), 'order_create'), Markup.button.callback(t(uid, 'execute'), 'order_list')],
     [Markup.button.callback(t(uid, 'shop'), 'shop'), Markup.button.callback(t(uid, 'tasks'), 'tasks')],
-    [Markup.button.callback('🎣 Рыбалка', 'fishing'), Markup.button.callback('🛒 Интернет', 'internet')],
+    [Markup.button.callback('🎣 Рыбалка', 'fishing'), Markup.button.callback('📦 Инвентарь', 'fish_inventory')],
+    [Markup.button.callback('💰 Аукцион', 'auction_list'), Markup.button.callback('🛒 Интернет', 'internet')],
     [Markup.button.callback('📰 Новости', 'news'), Markup.button.callback('💰 Донат', 'donate')],
     [Markup.button.callback('📧 Почта', 'mail'), Markup.button.callback('👤 Профиль', 'profile')],
     [Markup.button.callback(t(uid, 'balance'), 'balance'), Markup.button.callback(t(uid, 'topup'), 'topup_help')],
@@ -359,7 +362,7 @@ function tasksText(uid) {
     const isClaimed = claimed.has(task.id);
     text += `${isClaimed ? '✅' : done ? '🎁' : '⬜'} ${getLang(uid) === 'ru' ? task.ru : task.en} — +${task.reward} 🪙\n`;
   });
-  text += `\n🤝 Приглашено: ${referralCount.get(String(uid)) || 0}`;
+  text += `\n🤝 Приглашено: ${referralCount.get(String(uid)) || 0}\n🔗 ${referralLink(uid)}`;
   return text;
 }
 function tasksKeyboard(uid) {
@@ -369,6 +372,7 @@ function tasksKeyboard(uid) {
     const done = task.check(uid);
     if (done && !claimed.has(task.id)) rows.push([Markup.button.callback(`🎁 Забрать: ${getLang(uid) === 'ru' ? task.ru : task.en}`, `claim_task_${task.id}`)]);
   });
+  rows.push([Markup.button.url('🔗 Пригласить друга / Invite friend', referralLink(uid))]);
   rows.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
   return Markup.inlineKeyboard(rows);
 }
@@ -671,6 +675,8 @@ bot.action('admin_panel', async (ctx) => {
     [Markup.button.callback('🚫 Баны / Bans', 'admin_bans')],
     [Markup.button.callback('⛔ Ограничения / Restrict', 'admin_restrict')],
     [Markup.button.callback('💳 Пополнения / Topups', 'admin_topups')],
+    [Markup.button.callback('📰 Новости / News', 'admin_news')],
+    [Markup.button.callback('📺 Видео / Videos', 'admin_videos')],
     [Markup.button.callback('👑 Управление админами / Admins', 'admin_manage')],
     [Markup.button.callback(t(uid, 'back'), 'back_main')],
   ];
@@ -684,7 +690,9 @@ bot.action('admin_orders', async (ctx) => {
   if (list.length === 0) { await editMsg(ctx, 'Нет заказов. / No orders.', backKeyboard(ctx.from.id)); return; }
   let text = '📋 Последние заказы / Recent orders:\n\n';
   for (const o of list) text += `#${o.id} ${o.status} | ${o.currency === 'coins' ? '🪙' : '⭐'} ${o.amount} | ${o.description.slice(0, 40)}\n🔗 ${orderLink(o.id)}\n\n`;
-  await editMsg(ctx, text, backKeyboard(ctx.from.id));
+  const buttons = list.map(o => [Markup.button.callback(`🗑️ Удалить #${o.id}`, `del_order_${o.id}`)]);
+  buttons.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
+  await editMsg(ctx, text, Markup.inlineKeyboard(buttons));
 });
 
 bot.action('admin_users', async (ctx) => {
@@ -719,6 +727,61 @@ bot.action('admin_topups', async (ctx) => {
   let text = '💳 Последние пополнения / Recent topups:\n\n';
   for (const t of list) text += `${t.uid} +${t.amount}⭐ (${new Date(t.at).toLocaleString('ru-RU')})\n`;
   await editMsg(ctx, text, backKeyboard(ctx.from.id));
+});
+
+bot.action('admin_news', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  if (news.length === 0) { await editMsg(ctx, '📰 Новостей нет. / No news.', backKeyboard(ctx.from.id)); return; }
+  const buttons = news.slice(-20).reverse().map((n, i) => [Markup.button.callback(`🗑️ ${n.text.slice(0, 30)}`, `del_news_${i}`)]);
+  buttons.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
+  let text = '📰 Новости / News:\n\n';
+  news.slice(-20).reverse().forEach((n, i) => { text += `${i + 1}. ${n.text}\n`; });
+  await editMsg(ctx, text, Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^del_news_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const idx = parseInt(ctx.match[1]);
+  const reversed = news.slice(-20).reverse();
+  const target = reversed[idx];
+  if (target) {
+    const realIdx = news.indexOf(target);
+    if (realIdx >= 0) news.splice(realIdx, 1);
+    saveState();
+  }
+  await editMsg(ctx, '✅ Новость удалена. / News deleted.', Markup.inlineKeyboard([[Markup.button.callback('📰 Назад / Back', 'admin_news')]]));
+});
+
+bot.action('admin_videos', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const list = [...videos.values()].slice(-20).reverse();
+  if (list.length === 0) { await editMsg(ctx, '📺 Видео нет. / No videos.', backKeyboard(ctx.from.id)); return; }
+  const buttons = list.map(v => [Markup.button.callback(`🗑️ ${v.title}`, `del_video_${v.id}`)]);
+  buttons.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
+  let text = '📺 Видео / Videos:\n\n';
+  list.forEach(v => { text += `#${v.id} ${v.title} (${v.invested || 0}🪙) by ${v.creatorName}\n`; });
+  await editMsg(ctx, text, Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^del_video_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const id = parseInt(ctx.match[1]);
+  videos.delete(id);
+  saveState();
+  await editMsg(ctx, '✅ Видео удалено. / Video deleted.', Markup.inlineKeyboard([[Markup.button.callback('📺 Назад / Back', 'admin_videos')]]));
+});
+
+bot.action(/^del_order_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const id = parseInt(ctx.match[1]);
+  orders.delete(id);
+  saveState();
+  await editMsg(ctx, '✅ Заказ удалён. / Order deleted.', Markup.inlineKeyboard([[Markup.button.callback('📋 Назад / Back', 'admin_orders')]]));
 });
 
 bot.action('admin_manage', async (ctx) => {
@@ -773,6 +836,22 @@ async function handleAdminCommand(ctx, text) {
 Комиссия / Commission: ${[...orders.values()].filter(o=>o.status==='completed').reduce((a,o)=>a+(o.commission||0),0)}
 Реальных пополнений / Topups: ${transactions.filter(t=>t.type==='topup').length}
 Приглашений / Referrals: ${[...referralCount.values()].reduce((a,b)=>a+b,0)}`);
+  } else if (cmd === '/delnews') {
+    const idx = parseInt(parts[1]);
+    if (isNaN(idx) || idx < 1 || idx > news.length) { await ctx.reply('Использование: /delnews <номер>'); return; }
+    const removed = news.splice(news.length - idx, 1);
+    saveState();
+    await ctx.reply(`✅ Новость #${idx} удалена. / News deleted.`);
+  } else if (cmd === '/delvideo') {
+    const id = parseInt(parts[1]);
+    if (!videos.has(id)) { await ctx.reply('❌ Видео не найдено. / Video not found.'); return; }
+    videos.delete(id); saveState();
+    await ctx.reply(`✅ Видео #${id} удалено. / Video deleted.`);
+  } else if (cmd === '/delorder') {
+    const id = parseInt(parts[1]);
+    if (!orders.has(id)) { await ctx.reply('❌ Заказ не найден. / Order not found.'); return; }
+    orders.delete(id); saveState();
+    await ctx.reply(`✅ Заказ #${id} удалён. / Order deleted.`);
   } else if (cmd === '/gift') {
     const target = parts[1];
     const amount = parseInt(parts[2]);
