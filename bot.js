@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-const BOT_TOKEN = process.env.BOT_TOKEN || '9228974259:AAE5v1pBy4P4L7ksSqwAZOltDyY2AopATvY';
+const BOT_TOKEN = process.env.BOT_TOKEN || '9228974259:AAG0BazpYm22-ZFYZRX-KuCh6Vi1DyTb2hc';
 const MAIN_ADMIN = '7774448780';
 const COMMISSION = 0.05;
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
