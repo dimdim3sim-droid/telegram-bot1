@@ -1,8 +1,0 @@
-node_modules/
-.env
-bot.log
-bot.pid
-data.json
-start-bot.sh
-watchdog.sh
-.polydev/
