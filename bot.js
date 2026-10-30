@@ -505,6 +505,7 @@ bot.action(/^profile_view_(\d+)$/, async (ctx) => {
   const uid = ctx.from.id;
   const target = ctx.match[1];
   if (target === MAIN_ADMIN) { await editMsg(ctx, '🔒 Профиль администратора скрыт. / Admin profile hidden.', backKeyboard(uid)); return; }
+  if (!users.has(target)) { await editMsg(ctx, '❌ Пользователь не найден. / User not found.', backKeyboard(uid)); return; }
   const info = userInfos.get(target) || {};
   const uname = info.username ? `@${info.username}` : '—';
   const title = activeTitle.get(target) || 'Нет титула';
@@ -708,6 +709,7 @@ bot.action(/^bid_(\d+)$/, async (ctx) => {
   const id = parseInt(ctx.match[1]);
   const item = auction.get(id);
   if (!item || item.status !== 'open') { await editMsg(ctx, '❌ Лот недоступен. / Lot unavailable.', mainMenu(uid)); return; }
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
   if (item.sellerId === String(uid)) { await editMsg(ctx, '❌ Нельзя купить свой лот. / Cannot buy own lot.', mainMenu(uid)); return; }
   if (getStars(uid) < item.price) { await editMsg(ctx, `❌ Недостаточно звёзд. Нужно ${item.price}⭐. / Not enough stars.`, mainMenu(uid)); return; }
   addStars(uid, -item.price);
@@ -806,6 +808,17 @@ bot.action('donate', async (ctx) => {
   const uid = ctx.from.id;
   userState.set(uid, { mode: 'donate_target', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '💰 Введи ID пользователя для доната игровой валюты: / Enter user ID to donate coins:', backKeyboard(uid));
+});
+
+bot.action(/^donate_to_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const target = ctx.match[1];
+  if (!users.has(target)) { await editMsg(ctx, '❌ Пользователь не найден. / User not found.', backKeyboard(uid)); return; }
+  if (isBanned(target)) { await editMsg(ctx, '❌ Этот пользователь забанен. / User is banned.', backKeyboard(uid)); return; }
+  if (target === String(uid)) { await editMsg(ctx, '❌ Нельзя донатить себе. / Cannot donate to yourself.', backKeyboard(uid)); return; }
+  userState.set(uid, { mode: 'donate_target', target });
+  await ctx.reply(`💰 Сколько монет донатить пользователю ${target}? / How many coins to donate to ${target}?`);
 });
 
 bot.action('mail', async (ctx) => {
@@ -1248,6 +1261,7 @@ bot.on('text', async (ctx) => {
     const target = state.target;
     userState.delete(uid);
     if (!amount || amount <= 0) { await ctx.reply('❌ Введи положительное число. / Enter a positive number.'); return; }
+    if (amount > 100000) { await ctx.reply('❌ Слишком большая сумма. Максимум 100 000 ⭐. / Too large amount. Max 100 000 stars.'); return; }
     addStars(target, amount);
     manualCredits.push({ uid: String(target), amount, note: state.note || 'Ручное начисление', at: Date.now() });
     saveState();
@@ -1257,7 +1271,8 @@ bot.on('text', async (ctx) => {
   }
 
   if (state && state.mode === 'create_desc') {
-    state.description = text;
+    if (text.length > 2000) { await editPrompt(uid, '❌ Описание слишком длинное. Максимум 2000 символов. / Description too long. Max 2000 chars.', backKeyboard(uid)); return; }
+    state.description = sanitizeInput(text);
     state.mode = 'create_amount';
     userState.set(uid, state);
     await editPrompt(uid, '⭐ Сколько звёзд/монет заплатить за заказ? (число)\n📌 Минимум за звёзды — 20 ⭐ / How many stars/coins? (min 20 for stars)', backKeyboard(uid));
@@ -1267,6 +1282,7 @@ bot.on('text', async (ctx) => {
   if (state && state.mode === 'create_amount') {
     const n = parseInt(text);
     if (!n || n <= 0) { await editPrompt(uid, '❌ Введи положительное число. / Enter positive number.', backKeyboard(uid)); return; }
+    if (n > 100000) { await editPrompt(uid, '❌ Слишком большая сумма. Максимум 100 000. / Too large amount. Max 100 000.', backKeyboard(uid)); return; }
     state.amount = n;
     state.mode = 'create_currency';
     userState.set(uid, state);
@@ -1281,6 +1297,10 @@ bot.on('text', async (ctx) => {
   if (state && state.mode === 'submit') {
     const order = orders.get(state.orderId);
     if (!order) { userState.delete(uid); await editPrompt(uid, '❌ Заказ не найден. / Order not found.', mainMenu(uid)); return; }
+    if (isBanned(uid)) { userState.delete(uid); await editPrompt(uid, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+    if (isRestricted(uid)) { userState.delete(uid); await editPrompt(uid, '⛔ Вы ограничены в выполнении заказов. / Restricted.', mainMenu(uid)); return; }
+    if (order.takerId !== String(uid)) { userState.delete(uid); await editPrompt(uid, '❌ Это не твой заказ. / Not your order.', mainMenu(uid)); return; }
+    if (order.status !== 'taken') { userState.delete(uid); await editPrompt(uid, '❌ Заказ уже не активен. / Order no longer active.', mainMenu(uid)); return; }
     order.submissions.push({ type: 'text', content: text, from: String(uid), at: Date.now() });
     order.status = 'completed';
     userState.delete(uid);
@@ -1296,14 +1316,16 @@ bot.on('text', async (ctx) => {
   }
 
   if (state && state.mode === 'video_title') {
-    state.title = text;
+    if (text.length > 200) { await editPrompt(uid, '❌ Название слишком длинное. Максимум 200 символов. / Title too long. Max 200 chars.', backKeyboard(uid)); return; }
+    state.title = sanitizeInput(text);
     state.mode = 'video_desc';
     userState.set(uid, state);
     await editPrompt(uid, '🎬 Введи описание видео: / Enter video description:', backKeyboard(uid));
     return;
   }
   if (state && state.mode === 'video_desc') {
-    state.description = text;
+    if (text.length > 1000) { await editPrompt(uid, '❌ Описание слишком длинное. Максимум 1000 символов. / Description too long. Max 1000 chars.', backKeyboard(uid)); return; }
+    state.description = sanitizeInput(text);
     state.mode = 'video_upload';
     userState.set(uid, state);
     await editPrompt(uid, '🎬 Теперь пришли видеоролик (видео или файл) — он будет показываться зрителям.\nМожно пропустить: /skip\n\nNow send your video (or file) — viewers will see it. Skip: /skip', backKeyboard(uid));
@@ -1352,6 +1374,8 @@ bot.on('text', async (ctx) => {
   if (state && state.mode === 'donate_target') {
     const target = text.trim();
     if (target === String(uid)) { await editPrompt(uid, '❌ Нельзя донатить себе. / Cannot donate to yourself.', mainMenu(uid)); userState.delete(uid); return; }
+    if (!users.has(target)) { await editPrompt(uid, '❌ Пользователь не найден. / User not found.', mainMenu(uid)); userState.delete(uid); return; }
+    if (isBanned(target)) { await editPrompt(uid, '❌ Этот пользователь забанен. / User is banned.', mainMenu(uid)); userState.delete(uid); return; }
     userState.set(uid, { ...state, mode: 'donate_amount', target, promptMsgId: state.promptMsgId, chatId: state.chatId });
     await editPrompt(uid, '💰 Сколько монет донатить? / How many coins to donate?', backKeyboard(uid));
     return;
@@ -1377,6 +1401,7 @@ bot.on('text', async (ctx) => {
     userState.delete(uid);
     const target = text.trim();
     if (target === MAIN_ADMIN) { await editPrompt(uid, '🔒 Профиль администратора скрыт. / Admin profile is hidden.', mainMenu(uid)); return; }
+    if (!users.has(target)) { await editPrompt(uid, '❌ Пользователь не найден. / User not found.', mainMenu(uid)); return; }
     const title = activeTitle.get(target) || 'Нет титула';
     const fishCount = getFish(target).length;
     const videoCount = [...videos.values()].filter(v => v.creatorId === target).length;
@@ -1390,7 +1415,7 @@ bot.on('text', async (ctx) => {
   if (state && state.mode === 'auction_price') {
     const n = parseInt(text);
     if (!n || n <= 0) { await editPrompt(uid, '❌ Введи число. / Enter number.', backKeyboard(uid)); return; }
-    if (n < 1) { await editPrompt(uid, '❌ Минимальная цена 1 ⭐. / Minimum price 1 star.', backKeyboard(uid)); return; }
+    if (n < 1 || n > 100000) { await editPrompt(uid, '❌ Цена должна быть от 1 до 100 000 ⭐. / Price must be 1-100 000 stars.', backKeyboard(uid)); return; }
     const fish = state.fish;
     if (!fish) { userState.delete(uid); await editPrompt(uid, '❌ Нет рыбы. / No fish.', mainMenu(uid)); return; }
     const fishList = state.fishList || getFish(uid);
@@ -1437,6 +1462,10 @@ async function handleMedia(ctx, type) {
   if (!state || state.mode !== 'submit') return false;
   const order = orders.get(state.orderId);
   if (!order) { userState.delete(uid); await editPrompt(uid, '❌ Заказ не найден. / Order not found.', mainMenu(uid)); return true; }
+  if (isBanned(uid)) { userState.delete(uid); await editPrompt(uid, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return true; }
+  if (isRestricted(uid)) { userState.delete(uid); await editPrompt(uid, '⛔ Вы ограничены в выполнении заказов. / Restricted.', mainMenu(uid)); return true; }
+  if (order.takerId !== String(uid)) { userState.delete(uid); await editPrompt(uid, '❌ Это не твой заказ. / Not your order.', mainMenu(uid)); return true; }
+  if (order.status !== 'taken') { userState.delete(uid); await editPrompt(uid, '❌ Заказ уже не активен. / Order no longer active.', mainMenu(uid)); return true; }
 
   let fileId = null;
   if (type === 'photo') fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
@@ -1542,27 +1571,8 @@ bot.on('successful_payment', async (ctx) => {
   try { await bot.telegram.sendMessage(MAIN_ADMIN, `💰 Реальное пополнение: ${ctx.from.first_name} (${uid}) оплатил ${amount}⭐, зачислено ${credited}⭐ (комиссия ${commission}⭐)`); } catch (e) {}
 });
 
-bot.command('transfer', async (ctx) => {
-  const uid = ctx.from.id;
-  const parts = ctx.message.text.split(' ');
-  const target = parts[1];
-  const amount = parseInt(parts[2]);
-  if (!target || !amount || amount <= 0) {
-    await ctx.reply('Перевод звёзд другому пользователю:\n/transfer <userId> <сумма>\n\nПример: /transfer 123456789 10\n\nКомиссия 5% удерживается с отправителя.');
-    return;
-  }
-  if (String(target) === String(uid)) { await ctx.reply('❌ Нельзя перевести самому себе.'); return; }
-  if (getStars(uid) < amount) { await ctx.reply(`❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐`); return; }
-  const commission = Math.ceil(amount * 0.05);
-  const received = amount - commission;
-  addStars(uid, -amount);
-  addStars(target, received);
-  transactions.push({ uid: String(uid), target: String(target), amount, commission, type: 'transfer', at: Date.now() });
-  saveState();
-  await ctx.reply(`✅ Перевод выполнен!\n💸 Отправлено: ${amount} ⭐\n💸 Комиссия (5%): ${commission} ⭐\n📬 Получатель: ${received} ⭐\n💰 Твой баланс: ${getStars(uid)} ⭐`);
-  try { await bot.telegram.sendMessage(target, `📬 Тебе перевели ${received} ⭐ от пользователя ${uid}!`); } catch (e) {}
-  try { await bot.telegram.sendMessage(MAIN_ADMIN, `💸 Перевод: ${uid} → ${target}: ${amount}⭐ (комиссия ${commission}⭐)`); } catch (e) {}
-});
+// Команда /transfer удалена: прямой перевод звёзд между пользователями невозможен.
+// Звёзды можно передать только через покупку подарков/платных сообщений в Telegram.
 
 // ---- Логирование ошибок и защита от падения ----
 const LOG_FILE = path.join(__dirname, 'bot.log');
