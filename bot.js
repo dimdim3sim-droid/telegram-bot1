@@ -1,6 +1,7 @@
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '9228974259:AAE5v1pBy4P4L7ksSqwAZOltDyY2AopATvY';
 const MAIN_ADMIN = '7774448780';
@@ -282,6 +283,13 @@ function backKeyboard(uid) {
 
 bot.start(async (ctx) => {
   const uid = ctx.from.id;
+  const text = ctx.message.text || '';
+  // Автопинг от самого бота — не отвечаем, просто сохраняем пользователя
+  if (uid === Number(MAIN_ADMIN) && text === '/start autoping') {
+    users.add(String(uid));
+    saveState();
+    return;
+  }
   users.add(String(uid));
   const info = userInfos.get(String(uid)) || { firstSeen: Date.now() };
   if (ctx.from.username) info.username = ctx.from.username;
@@ -1417,6 +1425,25 @@ process.on('uncaughtException', (err) => {
   logError('Uncaught exception: ' + (err && err.message ? err.message : String(err)));
   // Не роняем процесс — логируем и продолжаем
 });
+
+// --- Простой HTTP сервер для пинга (чтобы Render не засыпал) ---
+const HTTP_PORT = process.env.PORT || 8080;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Bot is alive\n');
+}).listen(HTTP_PORT, () => {
+  console.log('🌐 HTTP ping server listening on port ' + HTTP_PORT);
+});
+
+// --- Авто-писатель: сам себе /start autoping каждые 10 минут ---
+setInterval(() => {
+  try {
+    bot.telegram.sendMessage(Number(MAIN_ADMIN), '/start autoping');
+    console.log('🔄 Автопинг отправлен (keep-alive)');
+  } catch (e) {
+    console.error('Ошибка автопинга: ' + (e && e.message ? e.message : String(e)));
+  }
+}, 10 * 60 * 1000);
 
 bot.launch();
 console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
