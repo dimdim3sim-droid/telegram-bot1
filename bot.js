@@ -42,6 +42,8 @@ const fishingCooldown = new Map();
 const userTasksClaimed = new Map();
 const userInvested = new Map();
 const userCompletedOrders = new Map();
+const paymentClaims = new Map(); // uid -> {at} — заявки на ручное пополнение
+const manualCredits = []; // {uid, amount, note, at} — лог ручных начислений
 
 const FISH = [
   { name: 'Карась', rarity: 'common', emoji: '🐟', value: 1 },
@@ -161,6 +163,8 @@ function loadState() {
     userTasksClaimed.clear(); (d.userTasksClaimed || []).forEach(([uid, arr]) => userTasksClaimed.set(uid, new Set(arr)));
     userInvested.clear(); (d.userInvested || []).forEach(([uid, n]) => userInvested.set(uid, n));
     userCompletedOrders.clear(); (d.userCompletedOrders || []).forEach(([uid, n]) => userCompletedOrders.set(uid, n));
+    paymentClaims.clear(); (d.paymentClaims || []).forEach(([uid, c]) => paymentClaims.set(uid, c));
+    manualCredits.length = 0; (d.manualCredits || []).forEach(c => manualCredits.push(c));
   } catch (e) { console.error('State load error:', e.message); }
 }
 
@@ -186,6 +190,8 @@ function saveState() {
       userTasksClaimed: [...userTasksClaimed.entries()].map(([uid, set]) => [uid, [...set]]),
       userInvested: [...userInvested.entries()],
       userCompletedOrders: [...userCompletedOrders.entries()],
+      paymentClaims: [...paymentClaims.entries()],
+      manualCredits: manualCredits.slice(-500),
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(data));
   } catch (e) { console.error('State save error:', e.message); }
@@ -250,6 +256,7 @@ function mainMenu(uid) {
     [Markup.button.callback('📰 Новости', 'news'), Markup.button.callback('💰 Донат', 'donate')],
     [Markup.button.callback('📧 Почта', 'mail'), Markup.button.callback('👤 Профиль', 'profile')],
     [Markup.button.callback(t(uid, 'balance'), 'balance'), Markup.button.callback(t(uid, 'topup'), 'topup_help')],
+    [Markup.button.callback('💳 Я оплатил в канале', 'paid_claim')],
     [Markup.button.callback(t(uid, 'suggest'), 'suggest_idea'), Markup.button.callback(t(uid, 'agreement'), 'show_agreement')],
     [Markup.button.callback(t(uid, 'lang'), 'lang_switch')],
   ];
@@ -319,7 +326,27 @@ bot.action('show_agreement', async (ctx) => {
 });
 bot.action('topup_help', async (ctx) => {
   await ctx.answerCbQuery();
-  await editMsg(ctx, '💳 Пополнение только реальными Telegram Stars:\n\n/pay 10\n/pay 50\n/pay 100\n\nПосле оплаты Stars зачислятся на баланс автоматически.\n\nTop up with real Telegram Stars only.', backKeyboard(ctx.from.id));
+  const uid = ctx.from.id;
+  const text = '💳 Пополнение реальными Telegram Stars:\n\nВыбери сумму (комиссия сервиса 5%):\n\nПосле оплаты Stars зачислятся на баланс автоматически.\n\nTop up with real Telegram Stars only.';
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback('⭐ 10 Stars → 9 на баланс', 'topup_10'), Markup.button.callback('⭐ 50 Stars → 47 на баланс', 'topup_50')],
+    [Markup.button.callback('⭐ 100 Stars → 95 на баланс', 'topup_100'), Markup.button.callback('⭐ 500 Stars → 475 на баланс', 'topup_500')],
+    [Markup.button.callback(t(uid, 'back'), 'back_main')],
+  ]);
+  await editMsg(ctx, text, kb);
+});
+bot.action(/^topup_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const amount = parseInt(ctx.match[1]);
+  await ctx.replyWithInvoice({
+    title: 'Пополнение баланса / Top up',
+    description: `Пополнение на ${amount} Telegram Stars (комиссия 5%)`,
+    payload: `topup_${uid}_${amount}_${Date.now()}`,
+    currency: 'XTR',
+    prices: [{ label: `Telegram Stars ${amount}`, amount }],
+    provider_token: '',
+  });
 });
 bot.action('lang_switch', async (ctx) => {
   await ctx.answerCbQuery();
@@ -665,16 +692,19 @@ bot.action('admin_panel', async (ctx) => {
 • Заказов: ${totalOrders} (открыто: ${openOrders}, выполнено: ${completedOrders})
 • Звёзд на балансах: ${totalStars}⭐
 • Монет: ${totalCoins} 🪙
-• Комиссия заработана: ${commissionEarned}⭐
-• Реальных пополнений: ${transactions.filter(t => t.type === 'topup').length}
+ • Комиссия заработана: ${commissionEarned}⭐
+ • Реальных пополнений: ${transactions.filter(t => t.type === 'topup').length}
+ • Ручных начислений: ${manualCredits.length}
+ • Ожидают заявки: ${paymentClaims.size}
 
-🔧 Действия:`;
+ 🔧 Действия:`;
   const rows = [
     [Markup.button.callback('📊 Все заказы / Orders', 'admin_orders')],
     [Markup.button.callback('👥 Пользователи / Users', 'admin_users')],
     [Markup.button.callback('🚫 Баны / Bans', 'admin_bans')],
     [Markup.button.callback('⛔ Ограничения / Restrict', 'admin_restrict')],
     [Markup.button.callback('💳 Пополнения / Topups', 'admin_topups')],
+    [Markup.button.callback('💳 Заявки (канал) / Claims', 'admin_claims')],
     [Markup.button.callback('📰 Новости / News', 'admin_news')],
     [Markup.button.callback('📺 Видео / Videos', 'admin_videos')],
     [Markup.button.callback('👑 Управление админами / Admins', 'admin_manage')],
@@ -727,6 +757,87 @@ bot.action('admin_topups', async (ctx) => {
   let text = '💳 Последние пополнения / Recent topups:\n\n';
   for (const t of list) text += `${t.uid} +${t.amount}⭐ (${new Date(t.at).toLocaleString('ru-RU')})\n`;
   await editMsg(ctx, text, backKeyboard(ctx.from.id));
+});
+
+// ---- Ручные платежи через канал (заявки) ----
+bot.action('paid_claim', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  if (paymentClaims.has(String(uid))) {
+    await editMsg(ctx, '⏳ У тебя уже есть заявка на проверку. Администратор скоро рассмотрит её. / You already have a pending claim.', backKeyboard(uid));
+    return;
+  }
+  paymentClaims.set(String(uid), { at: Date.now() });
+  saveState();
+  await editMsg(ctx, '✅ Заявка отправлена!\n\nАдминистратор проверит твои платежи в канале и начислит звёзды.\n\n📌 Как это работает:\n1. Ты платишь за сообщения в канале\n2. Жмёшь эту кнопку\n3. Админ проверяет и выдаёт звёзды\n\nClaim sent! The admin will verify your channel payments and credit your stars.', backKeyboard(uid));
+  // Уведомляем всех админов
+  for (const a of admins) {
+    try {
+      await bot.telegram.sendMessage(a, `💳 Новая заявка на ручное пополнение / New manual topup claim:\n\n👤 ${ctx.from.first_name || ''} ${ctx.from.last_name || ''}\n🆔 ${uid}\n🔗 t.me/${ctx.from.username || '—'}\n\nПроверь платежи в канале и начисли звёзды: /cred ${uid} <сумма>`, Markup.inlineKeyboard([[Markup.button.callback('✅ К заявкам / To claims', 'admin_claims')]]));
+    } catch (e) {}
+  }
+});
+
+bot.action('admin_claims', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const claims = [...paymentClaims.entries()];
+  if (claims.length === 0) {
+    let text = '💳 Заявок пока нет. / No claims yet.\n\nЧтобы начислить звёзды вручную: /cred <userId> <сумма> [заметка]';
+    if (manualCredits.length) {
+      text += '\n\n📜 Последние ручные начисления / Recent manual credits:\n';
+      manualCredits.slice(-10).reverse().forEach(c => { text += `${c.uid} +${c.amount}⭐ (${c.note || '—'}) — ${new Date(c.at).toLocaleString('ru-RU')}\n`; });
+    }
+    await editMsg(ctx, text, backKeyboard(ctx.from.id));
+    return;
+  }
+  let text = `💳 Заявки на ручное пополнение / Manual topup claims: ${claims.length}\n\n`;
+  const buttons = [];
+  claims.forEach(([u, c]) => {
+    text += `👤 ${u} — ${new Date(c.at).toLocaleString('ru-RU')}\n`;
+    buttons.push([Markup.button.callback(`✅ Выдать / Credit ${u}`, `claim_credit_${u}`), Markup.button.callback(`❌ Отклонить / Deny ${u}`, `claim_deny_${u}`)]);
+  });
+  if (manualCredits.length) {
+    text += '\n📜 Последние ручные начисления / Recent manual credits:\n';
+    manualCredits.slice(-5).reverse().forEach(c => { text += `${c.uid} +${c.amount}⭐ (${c.note || '—'})\n`; });
+  }
+  buttons.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
+  await editMsg(ctx, text, Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^claim_credit_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const target = ctx.match[1];
+  paymentClaims.delete(target);
+  saveState();
+  userState.set(ctx.from.id, { mode: 'cred_amount', target });
+  await ctx.reply(`💳 Сколько ⭐ начислить пользователю ${target}?\nВведи число (например, 70).`);
+});
+
+bot.action(/^claim_deny_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const target = ctx.match[1];
+  paymentClaims.delete(target);
+  saveState();
+  try { await bot.telegram.sendMessage(target, '❌ Заявка отклонена. Проверь, что все платежи в канале прошли, и попробуй снова. / Claim denied. Make sure all channel payments went through and try again.'); } catch (e) {}
+  await editMsg(ctx, `❌ Заявка пользователя ${target} отклонена. / Claim denied.`, Markup.inlineKeyboard([[Markup.button.callback('💳 К заявкам / To claims', 'admin_claims')]]));
+});
+
+bot.command('cred', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+  const parts = ctx.message.text.split(/\s+/);
+  const target = parts[1];
+  const amount = parseInt(parts[2]);
+  const note = parts.slice(3).join(' ') || 'Ручное начисление';
+  if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /cred <userId> <сумма> [заметка]\nПример: /cred 123456 70 7 сообщений в канале'); return; }
+  addStars(target, amount);
+  manualCredits.push({ uid: String(target), amount, note, at: Date.now() });
+  paymentClaims.delete(String(target));
+  saveState();
+  await ctx.reply(`✅ Начислено ${amount}⭐ пользователю ${target}.\n📝 ${note}`);
+  try { await bot.telegram.sendMessage(target, `✅ Тебе начислено ${amount} ⭐\n📝 ${note}\n💰 Баланс: ${getStars(target)} ⭐`); } catch (e) {}
 });
 
 bot.action('admin_news', async (ctx) => {
@@ -852,6 +963,25 @@ async function handleAdminCommand(ctx, text) {
     if (!orders.has(id)) { await ctx.reply('❌ Заказ не найден. / Order not found.'); return; }
     orders.delete(id); saveState();
     await ctx.reply(`✅ Заказ #${id} удалён. / Order deleted.`);
+  } else if (cmd === '/addstars') {
+    if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
+    const target = parts[1];
+    const amount = parseInt(parts[2]);
+    if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /addstars <userId> <сумма>'); return; }
+    addStars(target, amount);
+    transactions.push({ uid: target, amount, type: 'manual_add', at: Date.now() });
+    saveState();
+    await ctx.reply(`✅ Выдано ${amount} ⭐ пользователю ${target}. Баланс: ${getStars(target)} ⭐`);
+    try { await bot.telegram.sendMessage(target, `🎁 Тебе выдано ${amount} ⭐ от администратора.`); } catch (e) {}
+  } else if (cmd === '/takestars') {
+    if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
+    const target = parts[1];
+    const amount = parseInt(parts[2]);
+    if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /takestars <userId> <сумма>'); return; }
+    if (getStars(target) < amount) { await ctx.reply('❌ Недостаточно звёзд у пользователя.'); return; }
+    addStars(target, -amount);
+    saveState();
+    await ctx.reply(`✅ Снято ${amount} ⭐ с пользователя ${target}. Баланс: ${getStars(target)} ⭐`);
   } else if (cmd === '/gift') {
     const target = parts[1];
     const amount = parseInt(parts[2]);
@@ -889,6 +1019,19 @@ bot.on('text', async (ctx) => {
   if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены. / Banned.'); return; }
   const state = userState.get(uid);
   const text = ctx.message.text;
+
+  if (state && state.mode === 'cred_amount' && isAdmin(uid)) {
+    const amount = parseInt(text);
+    const target = state.target;
+    userState.delete(uid);
+    if (!amount || amount <= 0) { await ctx.reply('❌ Введи положительное число. / Enter a positive number.'); return; }
+    addStars(target, amount);
+    manualCredits.push({ uid: String(target), amount, note: 'Заявка из канала', at: Date.now() });
+    saveState();
+    await ctx.reply(`✅ Начислено ${amount}⭐ пользователю ${target}.`);
+    try { await bot.telegram.sendMessage(target, `✅ Тебе начислено ${amount} ⭐\n📝 Заявка из канала\n💰 Баланс: ${getStars(target)} ⭐`); } catch (e) {}
+    return;
+  }
 
   if (state && state.mode === 'create_desc') {
     state.description = text;
@@ -1135,11 +1278,35 @@ bot.on('successful_payment', async (ctx) => {
   const uid = ctx.from.id;
   const payment = ctx.message.successful_payment;
   const amount = payment.total_amount;
-  addStars(uid, amount);
-  transactions.push({ uid: String(uid), amount, type: 'topup', at: Date.now(), chargeId: payment.telegram_payment_charge_id });
+  const commission = Math.ceil(amount * 0.05);
+  const credited = amount - commission;
+  addStars(uid, credited);
+  transactions.push({ uid: String(uid), amount, credited, commission, type: 'topup', at: Date.now(), chargeId: payment.telegram_payment_charge_id });
   saveState();
-  await ctx.reply(`✅ Баланс пополнен на ${amount} ⭐\n💰 Текущий баланс: ${getStars(uid)} ⭐`, mainMenu(uid));
-  try { await bot.telegram.sendMessage(MAIN_ADMIN, `💰 Реальное пополнение: ${ctx.from.first_name} (${uid}) +${amount}⭐`); } catch (e) {}
+  await ctx.reply(`✅ Оплачено ${amount} ⭐\n💸 Комиссия сервиса (5%): ${commission} ⭐\n💰 Зачислено на баланс: ${credited} ⭐\n💰 Текущий баланс: ${getStars(uid)} ⭐`, mainMenu(uid));
+  try { await bot.telegram.sendMessage(MAIN_ADMIN, `💰 Реальное пополнение: ${ctx.from.first_name} (${uid}) оплатил ${amount}⭐, зачислено ${credited}⭐ (комиссия ${commission}⭐)`); } catch (e) {}
+});
+
+bot.command('transfer', async (ctx) => {
+  const uid = ctx.from.id;
+  const parts = ctx.message.text.split(' ');
+  const target = parts[1];
+  const amount = parseInt(parts[2]);
+  if (!target || !amount || amount <= 0) {
+    await ctx.reply('Перевод звёзд другому пользователю:\n/transfer <userId> <сумма>\n\nПример: /transfer 123456789 10\n\nКомиссия 5% удерживается с отправителя.');
+    return;
+  }
+  if (String(target) === String(uid)) { await ctx.reply('❌ Нельзя перевести самому себе.'); return; }
+  if (getStars(uid) < amount) { await ctx.reply(`❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐`); return; }
+  const commission = Math.ceil(amount * 0.05);
+  const received = amount - commission;
+  addStars(uid, -amount);
+  addStars(target, received);
+  transactions.push({ uid: String(uid), target: String(target), amount, commission, type: 'transfer', at: Date.now() });
+  saveState();
+  await ctx.reply(`✅ Перевод выполнен!\n💸 Отправлено: ${amount} ⭐\n💸 Комиссия (5%): ${commission} ⭐\n📬 Получатель: ${received} ⭐\n💰 Твой баланс: ${getStars(uid)} ⭐`);
+  try { await bot.telegram.sendMessage(target, `📬 Тебе перевели ${received} ⭐ от пользователя ${uid}!`); } catch (e) {}
+  try { await bot.telegram.sendMessage(MAIN_ADMIN, `💸 Перевод: ${uid} → ${target}: ${amount}⭐ (комиссия ${commission}⭐)`); } catch (e) {}
 });
 
 // ---- Логирование ошибок и защита от падения ----

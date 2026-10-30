@@ -5,7 +5,7 @@ const path = require('path');
 const BOT_TOKEN = process.env.BOT_TOKEN || '9228974259:AAE5v1pBy4P4L7ksSqwAZOltDyY2AopATvY';
 const MAIN_ADMIN = '7774448780';
 const COMMISSION = 0.05;
-const DATA_FILE = path.join(__dirname, 'data.json');
+const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
 const HELPER_LINK = 'https://t.me/helperxaze';
 const FISH_COOLDOWN = 12 * 60 * 60 * 1000;
 
@@ -116,12 +116,14 @@ const AGREEMENT = `📜 Пользовательское соглашение / 
 
 1. Сервис — площадка для заказов и выполнения работ за Telegram Stars.
 2. Комиссия сервиса — 5% от суммы заказа.
-3. Исполнитель обязуется выполнить заказ качественно.
-4. Оплата только реальными Telegram Stars.
-5. Запрещены мошенничество, спам, незаконный контент.
-6. Администрация может забанить/ограничить пользователя.
-7. Споры разрешаются администрацией.
-8. Игровая валюта (монеты) зарабатывается за задания.`;
+3. Исполнитель обязуется выполнить заказ качественно и в срок.
+4. Оплата только реальными Telegram Stars, без возвратов после выполнения.
+5. Запрещены мошенничество, спам, оскорбления, незаконный контент.
+6. Администрация вправе забанить/ограничить пользователя при нарушении правил.
+7. Споры разрешаются администрацией добросовестно.
+8. Игровая валюта (монеты) зарабатывается за задания и выполнение заказов.
+9. Пользователь несёт ответственность за свои действия на платформе.
+10. Используя бота, вы соглашаетесь с условиями.`;
 
 function getLang(uid) { return userLang.get(String(uid)) || 'ru'; }
 function setLang(uid, l) { userLang.set(String(uid), l); saveState(); }
@@ -834,6 +836,41 @@ async function handleAdminCommand(ctx, text) {
 Комиссия / Commission: ${[...orders.values()].filter(o=>o.status==='completed').reduce((a,o)=>a+(o.commission||0),0)}
 Реальных пополнений / Topups: ${transactions.filter(t=>t.type==='topup').length}
 Приглашений / Referrals: ${[...referralCount.values()].reduce((a,b)=>a+b,0)}`);
+  } else if (cmd === '/delnews') {
+    const idx = parseInt(parts[1]);
+    if (isNaN(idx) || idx < 1 || idx > news.length) { await ctx.reply('Использование: /delnews <номер>'); return; }
+    const removed = news.splice(news.length - idx, 1);
+    saveState();
+    await ctx.reply(`✅ Новость #${idx} удалена. / News deleted.`);
+  } else if (cmd === '/delvideo') {
+    const id = parseInt(parts[1]);
+    if (!videos.has(id)) { await ctx.reply('❌ Видео не найдено. / Video not found.'); return; }
+    videos.delete(id); saveState();
+    await ctx.reply(`✅ Видео #${id} удалено. / Video deleted.`);
+  } else if (cmd === '/delorder') {
+    const id = parseInt(parts[1]);
+    if (!orders.has(id)) { await ctx.reply('❌ Заказ не найден. / Order not found.'); return; }
+    orders.delete(id); saveState();
+    await ctx.reply(`✅ Заказ #${id} удалён. / Order deleted.`);
+  } else if (cmd === '/addstars') {
+    if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
+    const target = parts[1];
+    const amount = parseInt(parts[2]);
+    if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /addstars <userId> <сумма>'); return; }
+    addStars(target, amount);
+    transactions.push({ uid: target, amount, type: 'manual_add', at: Date.now() });
+    saveState();
+    await ctx.reply(`✅ Выдано ${amount} ⭐ пользователю ${target}. Баланс: ${getStars(target)} ⭐`);
+    try { await bot.telegram.sendMessage(target, `🎁 Тебе выдано ${amount} ⭐ от администратора.`); } catch (e) {}
+  } else if (cmd === '/takestars') {
+    if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
+    const target = parts[1];
+    const amount = parseInt(parts[2]);
+    if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /takestars <userId> <сумма>'); return; }
+    if (getStars(target) < amount) { await ctx.reply('❌ Недостаточно звёзд у пользователя.'); return; }
+    addStars(target, -amount);
+    saveState();
+    await ctx.reply(`✅ Снято ${amount} ⭐ с пользователя ${target}. Баланс: ${getStars(target)} ⭐`);
   } else if (cmd === '/gift') {
     const target = parts[1];
     const amount = parseInt(parts[2]);
@@ -1124,8 +1161,31 @@ bot.on('successful_payment', async (ctx) => {
   try { await bot.telegram.sendMessage(MAIN_ADMIN, `💰 Реальное пополнение: ${ctx.from.first_name} (${uid}) +${amount}⭐`); } catch (e) {}
 });
 
+// ---- Логирование ошибок и защита от падения ----
+const LOG_FILE = path.join(__dirname, 'bot.log');
+function logError(msg) {
+  try {
+    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch (e) {}
+  console.error(msg);
+}
+
+bot.on('error', (err) => {
+  logError('Bot error: ' + (err && err.message ? err.message : String(err)));
+});
+
+process.on('unhandledRejection', (reason) => {
+  logError('Unhandled rejection: ' + (reason && reason.message ? reason.message : String(reason)));
+});
+
+process.on('uncaughtException', (err) => {
+  logError('Uncaught exception: ' + (err && err.message ? err.message : String(err)));
+  // Не роняем процесс — логируем и продолжаем
+});
+
 bot.launch();
 console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
+logError('Bot launched OK');
 
 process.on('SIGINT', () => { saveState(); bot.stop('SIGINT'); });
 process.on('SIGTERM', () => { saveState(); bot.stop('SIGTERM'); });
