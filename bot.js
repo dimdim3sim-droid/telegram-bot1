@@ -64,6 +64,10 @@ function checkRateLimit(uid, command) {
   const now = Date.now();
   const key = String(uid);
 
+  // Если пользователь в процессе заполнения формы — не блокируем
+  const st = userState.get(key);
+  if (st && st.mode) return { ok: true };
+
   // Общий лимит сообщений
   let msgData = messageCounts.get(key);
   if (!msgData || now > msgData.resetTime) {
@@ -114,21 +118,19 @@ bot.use(async (ctx, next) => {
 
   // Админы без лимитов (но с базовой проверкой)
   if (!isAdminUser) {
-    const command = ctx.updateType === 'message' && ctx.message.text
-      ? ctx.message.text.split(' ')[0]
-      : ctx.updateType === 'callback_query' && ctx.callbackQuery.data
-      ? ctx.callbackQuery.data
-      : 'other';
-
-    const limit = checkRateLimit(uid, command);
-    if (!limit.ok) {
-      try { await ctx.reply(limit.reason); } catch (e) {}
-      return;
+    // Ограничиваем только текстовые команды, не нажатия кнопок (callback_query)
+    if (ctx.updateType === 'message' && ctx.message.text) {
+      const command = ctx.message.text.split(' ')[0];
+      const limit = checkRateLimit(uid, command);
+      if (!limit.ok) {
+        try { await ctx.reply(limit.reason); } catch (e) {}
+        return;
+      }
     }
   }
 
   // Защита от обработки своих же сообщений ботом (предотвращение циклов)
-  if (ctx.updateType === 'message' && ctx.message.text === '/start autoping') {
+  if (ctx.updateType === 'message' && ctx.message.text === '/start autiking') {
     return; // автопинг не обрабатываем как обычную команду
   }
 
@@ -1071,31 +1073,52 @@ async function handleAdminCommand(ctx, text) {
   if (!isAdmin(uid)) return;
   const parts = text.split(' ');
   const cmd = parts[0];
+  
+  // Валидация userId для команд с целью
+  function validateTarget(target) {
+    if (!target) return { ok: false, msg: 'Использование: <command> <userId>' };
+    if (!/^\d+$/.test(target)) return { ok: false, msg: '❌ Неверный ID пользователя. / Invalid user ID.' };
+    return { ok: true };
+  }
+
   if (cmd === '/ban') {
+    const v = validateTarget(parts[1]);
+    if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
-    if (!target) { await ctx.reply('Использование: /ban <userId>'); return; }
+    if (target === MAIN_ADMIN) { await ctx.reply('❌ Нельзя забанить главного админа.'); return; }
     banned.add(target); saveState();
     await ctx.reply(`🚫 Пользователь ${target} забанен. / Banned.`);
     try { await bot.telegram.sendMessage(target, '🚫 Вы забанены администратором. / You are banned.'); } catch (e) {}
   } else if (cmd === '/unban') {
+    const v = validateTarget(parts[1]);
+    if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
     banned.delete(target); saveState();
     await ctx.reply(`✅ Пользователь ${target} разбанен. / Unbanned.`);
   } else if (cmd === '/restrict') {
+    const v = validateTarget(parts[1]);
+    if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
+    if (target === MAIN_ADMIN) { await ctx.reply('❌ Нельзя ограничить главного админа.'); return; }
     restricted.add(target); saveState();
     await ctx.reply(`⛔ Пользователь ${target} ограничен. / Restricted.`);
   } else if (cmd === '/unrestrict') {
+    const v = validateTarget(parts[1]);
+    if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
     restricted.delete(target); saveState();
     await ctx.reply(`✅ Ограничение снято с ${target}. / Unrestricted.`);
   } else if (cmd === '/addadmin') {
     if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
+    const v = validateTarget(parts[1]);
+    if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
     admins.add(target); saveState();
     await ctx.reply(`👑 ${target} теперь админ. / is admin now.`);
   } else if (cmd === '/removeadmin') {
     if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
+    const v = validateTarget(parts[1]);
+    if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
     if (target === MAIN_ADMIN) { await ctx.reply('❌ Нельзя удалить главного админа. / Cannot remove main admin.'); return; }
     admins.delete(target); saveState();
@@ -1129,9 +1152,11 @@ async function handleAdminCommand(ctx, text) {
     await ctx.reply(`✅ Заказ #${id} удалён. / Order deleted.`);
   } else if (cmd === '/addstars') {
     if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
+    const v = validateTarget(parts[1]);
+    if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
     const amount = parseInt(parts[2]);
-    if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /addstars <userId> <сумма>'); return; }
+    if (!amount || amount <= 0) { await ctx.reply('Использование: /addstars <userId> <сумма>'); return; }
     addStars(target, amount);
     transactions.push({ uid: target, amount, type: 'manual_add', at: Date.now() });
     saveState();
@@ -1139,9 +1164,11 @@ async function handleAdminCommand(ctx, text) {
     try { await bot.telegram.sendMessage(target, `🎁 Тебе выдано ${amount} ⭐ от администратора.`); } catch (e) {}
   } else if (cmd === '/takestars') {
     if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
+    const v = validateTarget(parts[1]);
+    if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
     const amount = parseInt(parts[2]);
-    if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /takestars <userId> <сумма>'); return; }
+    if (!amount || amount <= 0) { await ctx.reply('Использование: /takestars <userId> <сумма>'); return; }
     if (getStars(target) < amount) { await ctx.reply('❌ Недостаточно звёзд у пользователя.'); return; }
     addStars(target, -amount);
     saveState();
@@ -1150,9 +1177,16 @@ async function handleAdminCommand(ctx, text) {
     const target = parts[1];
     const amount = parseInt(parts[2]);
     const title = parts[3];
-    if (!target || !amount) { await ctx.reply('Использование: /gift <userId> <coins> [titleId]'); return; }
+    if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /gift <userId> <coins> [titleId]'); return; }
+    if (!/^\d+$/.test(target)) { await ctx.reply('❌ Неверный ID пользователя. / Invalid user ID.'); return; }
     addCoins(target, amount);
-    if (title) { const owned = ownedTitles.get(String(target)) || new Set(); owned.add(title); ownedTitles.set(String(target), owned); }
+    if (title) {
+      const titleObj = TITLES.find(t => t.id === title);
+      if (!titleObj) { await ctx.reply('❌ Такого титула не существует. / Title does not exist.'); return; }
+      const owned = ownedTitles.get(String(target)) || new Set();
+      owned.add(title);
+      ownedTitles.set(String(target), owned);
+    }
     addMail(target, { text: `Подарок от администратора`, gift: title ? 'Титул + монеты' : 'Монеты', giftCoins: amount, giftTitle: title || null, at: Date.now() });
     saveState();
     await ctx.reply(`🎁 Подарок отправлен ${target}: ${amount}🪙 ${title || ''}`);
@@ -1171,6 +1205,7 @@ bot.command('news', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const text = ctx.message.text.replace('/news', '').trim();
   if (!text) { await ctx.reply('Использование: /news <текст>'); return; }
+  if (news.length >= 100) { await ctx.reply('❌ Лимит новостей исчерпан (макс. 100). Удали старые через /delnews.'); return; }
   news.push({ title: 'Новость / News', text, at: Date.now() });
   saveState();
   await ctx.reply('✅ Новость опубликована. / News published.');
@@ -1309,6 +1344,8 @@ bot.on('text', async (ctx) => {
     if (!n || n <= 0) { await editPrompt(uid, '❌ Введи число. / Enter number.', backKeyboard(uid)); return; }
     if (getCoins(uid) < n) { await editPrompt(uid, `❌ Недостаточно монет. У тебя ${getCoins(uid)} 🪙. / Not enough coins.`, backKeyboard(uid)); return; }
     const target = state.target;
+    if (isBanned(target)) { await editPrompt(uid, '❌ Этот пользователь забанен. / User is banned.', mainMenu(uid)); userState.delete(uid); return; }
+    if (isBanned(uid)) { await editPrompt(uid, '🚫 Вы забанены. / You are banned.', mainMenu(uid)); userState.delete(uid); return; }
     addCoins(uid, -n);
     addCoins(target, n);
     saveState();
@@ -1335,6 +1372,7 @@ bot.on('text', async (ctx) => {
   if (state && state.mode === 'auction_price') {
     const n = parseInt(text);
     if (!n || n <= 0) { await editPrompt(uid, '❌ Введи число. / Enter number.', backKeyboard(uid)); return; }
+    if (n < 1) { await editPrompt(uid, '❌ Минимальная цена 1 ⭐. / Minimum price 1 star.', backKeyboard(uid)); return; }
     const fish = state.fish;
     if (!fish) { userState.delete(uid); await editPrompt(uid, '❌ Нет рыбы. / No fish.', mainMenu(uid)); return; }
     const fishList = state.fishList || getFish(uid);
