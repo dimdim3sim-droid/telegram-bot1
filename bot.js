@@ -338,13 +338,23 @@ function getProfile(uid) { if (!userProfiles.has(String(uid))) userProfiles.set(
 function incCompletedOrders(uid) { userCompletedOrders.set(String(uid), (userCompletedOrders.get(String(uid)) || 0) + 1); saveState(); }
 function addInvested(uid, n) { userInvested.set(String(uid), (userInvested.get(String(uid)) || 0) + n); saveState(); }
 
+let BOT_USERNAME = null;
+
+async function ensureBotInfo() {
+  try {
+    const me = await bot.telegram.getMe();
+    BOT_USERNAME = me.username;
+    console.log('🤖 Бот: @' + BOT_USERNAME);
+  } catch (e) {
+    console.error('Не удалось получить информацию о боте: ' + (e && e.message ? e.message : String(e)));
+  }
+}
+
 function orderLink(id) {
-  const username = bot.botInfo && bot.botInfo.username;
-  return username ? `https://t.me/${username}?start=order_${id}` : `Заказ #${id}`;
+  return BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=order_${id}` : `Заказ #${id}`;
 }
 function referralLink(uid) {
-  const username = bot.botInfo && bot.botInfo.username;
-  return username ? `https://t.me/${username}?start=ref_${uid}` : `ref_${uid}`;
+  return BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=ref_${uid}` : `ref_${uid}`;
 }
 
 async function editMsg(ctx, text, markup) {
@@ -1617,9 +1627,45 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
-bot.launch();
-console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
-logError('Bot launched OK');
+// Запуск бота с защитой от конфликтов (409 Conflict)
+async function startBot() {
+  try {
+    // Получаем информацию о боте (username для ссылок)
+    await ensureBotInfo();
+  } catch (e) {
+    console.error('Не удалось получить информацию о боте: ' + (e && e.message ? e.message : String(e)));
+  }
+
+  try {
+    // Отключаем вебхук перед запуском long-polling, чтобы не было конфликтов
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    console.log('🗑 Webhook отключён');
+  } catch (e) {
+    console.error('Не удалось отключить вебхук: ' + (e && e.message ? e.message : String(e)));
+  }
+
+  try {
+    await bot.launch();
+    console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
+    logError('Bot launched OK');
+  } catch (e) {
+    console.error('Ошибка запуска бота: ' + (e && e.message ? e.message : String(e)));
+    // Пробуем ещё раз через 10 секунд
+    setTimeout(startBot, 10000);
+  }
+}
+
+startBot();
+
+// Глобальный обработчик ошибок Telegraf — бот не падает при ошибке в одном обработчике
+bot.catch((err, ctx) => {
+  logError('Telegraf error: ' + (err && err.message ? err.message : String(err)));
+  try {
+    if (ctx && ctx.reply) {
+      ctx.reply('⚠️ Произошла внутренняя ошибка. Попробуйте позже. / Internal error. Try later.').catch(() => {});
+    }
+  } catch (e) {}
+});
 
 process.on('SIGINT', () => { saveState(); bot.stop('SIGINT'); });
 process.on('SIGTERM', () => { saveState(); bot.stop('SIGTERM'); });
