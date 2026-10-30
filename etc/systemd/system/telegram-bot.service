@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/bot
-EnvironmentFile=/root/bot/.env
+WorkingDirectory=/workspace
+EnvironmentFile=/workspace/.env
 ExecStart=/usr/bin/node bot.js
 Restart=always
 RestartSec=10

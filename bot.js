@@ -498,6 +498,8 @@ bot.action('balance', async (ctx) => {
 bot.action('profile', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   const title = activeTitle.get(String(uid)) || 'Нет титула';
   const fishCount = getFish(uid).length;
   const videoCount = [...videos.values()].filter(v => v.creatorId === String(uid)).length;
@@ -507,6 +509,8 @@ bot.action('profile', async (ctx) => {
 bot.action('profile_view_other', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   userState.set(uid, { mode: 'profile_view', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '🔍 Введи ID пользователя: / Enter user ID:', backKeyboard(uid));
 });
@@ -517,6 +521,7 @@ bot.action(/^profile_view_(\d+)$/, async (ctx) => {
   const target = ctx.match[1];
   if (target === MAIN_ADMIN) { await editMsg(ctx, '🔒 Профиль администратора скрыт. / Admin profile hidden.', backKeyboard(uid)); return; }
   if (!users.has(target)) { await editMsg(ctx, '❌ Пользователь не найден. / User not found.', backKeyboard(uid)); return; }
+  if (isBanned(target)) { await editMsg(ctx, '🚫 Этот пользователь забанен. / User is banned.', backKeyboard(uid)); return; }
   const info = userInfos.get(target) || {};
   const uname = info.username ? `@${info.username}` : '—';
   const title = activeTitle.get(target) || 'Нет титула';
@@ -553,6 +558,8 @@ function tasksKeyboard(uid) {
 bot.action('tasks', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   await editMsg(ctx, tasksText(uid), tasksKeyboard(uid));
 });
 bot.action(/^claim_task_(.+)$/, async (ctx) => {
@@ -573,6 +580,8 @@ bot.action(/^claim_task_(.+)$/, async (ctx) => {
 bot.action('shop', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   const buttons = TITLES.map(tl => [Markup.button.callback(`${tl.name} — ${tl.price} 🪙`, `buy_title_${tl.id}`)]);
   buttons.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
   let text = `🛒 Магазин титулов / Titles shop\n\nТвои монеты: ${getCoins(uid)} 🪙\n\n`;
@@ -645,6 +654,7 @@ bot.action('fishing', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
   if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   const last = fishingCooldown.get(String(uid)) || 0;
   const now = Date.now();
   if (now - last < FISH_COOLDOWN) {
@@ -666,6 +676,8 @@ bot.action('fishing', async (ctx) => {
 bot.action('fish_inventory', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   const fish = getFish(uid);
   if (fish.length === 0) { await editMsg(ctx, '📦 Инвентарь пуст. / Inventory empty.', mainMenu(uid)); return; }
   const counts = {};
@@ -684,6 +696,8 @@ bot.action('fish_inventory', async (ctx) => {
 bot.action('auction_list', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   const items = [...auction.values()].filter(a => a.status === 'open');
   if (items.length === 0) { await editMsg(ctx, '💰 Аукцион пуст. / Auction empty.', mainMenu(uid)); return; }
   const buttons = items.map(a => [Markup.button.callback(`#${a.id} ${a.fish.emoji} ${a.fish.name} — ${a.price}⭐`, `bid_${a.id}`)]);
@@ -721,6 +735,7 @@ bot.action(/^bid_(\d+)$/, async (ctx) => {
   const item = auction.get(id);
   if (!item || item.status !== 'open') { await editMsg(ctx, '❌ Лот недоступен. / Lot unavailable.', mainMenu(uid)); return; }
   if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   if (item.sellerId === String(uid)) { await editMsg(ctx, '❌ Нельзя купить свой лот. / Cannot buy own lot.', mainMenu(uid)); return; }
   if (getStars(uid) < item.price) { await editMsg(ctx, `❌ Недостаточно звёзд. Нужно ${item.price}⭐. / Not enough stars.`, mainMenu(uid)); return; }
   addStars(uid, -item.price);
@@ -736,6 +751,8 @@ bot.action(/^bid_(\d+)$/, async (ctx) => {
 bot.action('internet', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   await editMsg(ctx, '🛒 Интернет / Internet\n\nВыбери действие:', Markup.inlineKeyboard([
     [Markup.button.callback('📺 Смотреть видео / Watch', 'video_list')],
     [Markup.button.callback('🎬 Создать видео / Create', 'video_create')],
@@ -747,6 +764,8 @@ bot.action('internet', async (ctx) => {
 bot.action('video_list', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   const list = [...videos.values()].sort((a, b) => (b.invested || 0) - (a.invested || 0)).slice(0, 15);
   if (list.length === 0) { await editMsg(ctx, '📺 Видео пока нет. / No videos yet.', mainMenu(uid)); return; }
   const buttons = list.map(v => [Markup.button.callback(`${v.title} (${v.invested || 0}🪙)`, `view_video_${v.id}`)]);
@@ -757,6 +776,8 @@ bot.action('video_list', async (ctx) => {
 bot.action('video_create', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   userState.set(uid, { mode: 'video_title', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '🎬 Введи название видео: / Enter video title:', backKeyboard(uid));
 });
@@ -764,6 +785,8 @@ bot.action('video_create', async (ctx) => {
 bot.action('video_search', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   userState.set(uid, { mode: 'video_search', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '🔍 Введи название для поиска: / Enter search query:', backKeyboard(uid));
 });
@@ -808,6 +831,8 @@ bot.action(/^invest_(\d+)$/, async (ctx) => {
 bot.action('news', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   if (news.length === 0) { await editMsg(ctx, '📰 Новостей пока нет. / No news yet.', mainMenu(uid)); return; }
   let text = '📰 Новости / News:\n\n';
   news.slice(-10).reverse().forEach(n => { text += `📌 ${n.title}\n${n.text}\n— ${new Date(n.at).toLocaleDateString('ru-RU')}\n\n`; });
@@ -817,6 +842,8 @@ bot.action('news', async (ctx) => {
 bot.action('donate', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   userState.set(uid, { mode: 'donate_target', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '💰 Введи ID пользователя для доната игровой валюты: / Enter user ID to donate coins:', backKeyboard(uid));
 });
@@ -827,6 +854,7 @@ bot.action(/^donate_to_(\d+)$/, async (ctx) => {
   const target = ctx.match[1];
   if (!users.has(target)) { await editMsg(ctx, '❌ Пользователь не найден. / User not found.', backKeyboard(uid)); return; }
   if (isBanned(target)) { await editMsg(ctx, '❌ Этот пользователь забанен. / User is banned.', backKeyboard(uid)); return; }
+  if (isRestricted(target)) { await editMsg(ctx, '⛔ Этот пользователь ограничен. / User is restricted.', backKeyboard(uid)); return; }
   if (target === String(uid)) { await editMsg(ctx, '❌ Нельзя донатить себе. / Cannot donate to yourself.', backKeyboard(uid)); return; }
   userState.set(uid, { mode: 'donate_target', target });
   await ctx.reply(`💰 Сколько монет донатить пользователю ${target}? / How many coins to donate to ${target}?`);
@@ -835,6 +863,8 @@ bot.action(/^donate_to_(\d+)$/, async (ctx) => {
 bot.action('mail', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
   const messages = getMail(uid);
   if (messages.length === 0) { await editMsg(ctx, '📧 Почта пуста. / Mailbox empty.', mainMenu(uid)); return; }
   let text = '📧 Твоя почта / Your mail:\n\n';
@@ -998,6 +1028,8 @@ bot.action(/^claim_credit_(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   if (!isAdmin(ctx.from.id)) return;
   const target = ctx.match[1];
+  if (isBanned(target)) { await editMsg(ctx, '🚫 Этот пользователь забанен. / User is banned.', backKeyboard(ctx.from.id)); return; }
+  if (isRestricted(target)) { await editMsg(ctx, '⛔ Этот пользователь ограничен. / User is restricted.', backKeyboard(ctx.from.id)); return; }
   paymentClaims.delete(target);
   saveState();
   userState.set(ctx.from.id, { mode: 'cred_amount', target, note: 'Заявка из канала' });
@@ -1031,6 +1063,8 @@ bot.command('cred', async (ctx) => {
   const amount = parseInt(parts[2]);
   const note = parts.slice(3).join(' ') || 'Ручное начисление';
   if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /cred <userId> <сумма> [заметка]\nПример: /cred 123456 70 7 сообщений в канале'); return; }
+  if (isBanned(target)) { await ctx.reply('🚫 Этот пользователь забанен. / User is banned.'); return; }
+  if (isRestricted(target)) { await ctx.reply('⛔ Этот пользователь ограничен. / User is restricted.'); return; }
   addStars(target, amount);
   manualCredits.push({ uid: String(target), amount, note, at: Date.now() });
   paymentClaims.delete(String(target));
@@ -1057,8 +1091,8 @@ bot.action(/^del_news_(\d+)$/, async (ctx) => {
   const reversed = news.slice(-20).reverse();
   const target = reversed[idx];
   if (target) {
-    const realIdx = news.indexOf(target);
-    if (realIdx >= 0) news.splice(realIdx, 1);
+    const realIdx = news.length - 1 - idx;
+    if (realIdx >= 0 && realIdx < news.length) news.splice(realIdx, 1);
     saveState();
   }
   await editMsg(ctx, '✅ Новость удалена. / News deleted.', Markup.inlineKeyboard([[Markup.button.callback('📰 Назад / Back', 'admin_news')]]));
@@ -1212,6 +1246,8 @@ async function handleAdminCommand(ctx, text) {
     const v = validateTarget(parts[1]);
     if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
+    if (isBanned(target)) { await ctx.reply('🚫 Этот пользователь забанен. / User is banned.'); return; }
+    if (isRestricted(target)) { await ctx.reply('⛔ Этот пользователь ограничен. / User is restricted.'); return; }
     const amount = parseInt(parts[2]);
     if (!amount || amount <= 0) { await ctx.reply('Использование: /addstars <userId> <сумма>'); return; }
     addStars(target, amount);
@@ -1224,6 +1260,8 @@ async function handleAdminCommand(ctx, text) {
     const v = validateTarget(parts[1]);
     if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
+    if (isBanned(target)) { await ctx.reply('🚫 Этот пользователь забанен. / User is banned.'); return; }
+    if (isRestricted(target)) { await ctx.reply('⛔ Этот пользователь ограничен. / User is restricted.'); return; }
     const amount = parseInt(parts[2]);
     if (!amount || amount <= 0) { await ctx.reply('Использование: /takestars <userId> <сумма>'); return; }
     if (getStars(target) < amount) { await ctx.reply('❌ Недостаточно звёзд у пользователя.'); return; }
@@ -1236,6 +1274,8 @@ async function handleAdminCommand(ctx, text) {
     const title = parts[3];
     if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /gift <userId> <coins> [titleId]'); return; }
     if (!/^\d+$/.test(target)) { await ctx.reply('❌ Неверный ID пользователя. / Invalid user ID.'); return; }
+    if (isBanned(target)) { await ctx.reply('🚫 Этот пользователь забанен. / User is banned.'); return; }
+    if (isRestricted(target)) { await ctx.reply('⛔ Этот пользователь ограничен. / User is restricted.'); return; }
     addCoins(target, amount);
     if (title) {
       const titleObj = TITLES.find(t => t.id === title);
@@ -1266,7 +1306,10 @@ bot.command('news', async (ctx) => {
   news.push({ title: 'Новость / News', text, at: Date.now() });
   saveState();
   await ctx.reply('✅ Новость опубликована. / News published.');
-  for (const u of users) { try { await bot.telegram.sendMessage(u, `📰 Новая новость / New news:\n\n${text}`); } catch (e) {} }
+  for (const u of users) {
+    if (isBanned(u) || isRestricted(u)) continue;
+    try { await bot.telegram.sendMessage(u, `📰 Новая новость / New news:\n\n${text}`); } catch (e) {}
+  }
 });
 
 // ---- Text handler ----
@@ -1457,7 +1500,7 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  if (isAdmin(uid) && text.startsWith('/')) {
+  if (isAdmin(uid) && text.startsWith('/') && text !== '/start') {
     await handleAdminCommand(ctx, text);
     return;
   }
@@ -1619,13 +1662,13 @@ bot.on('error', (err) => {
   logError('Bot error: ' + (err && err.message ? err.message : String(err)));
 });
 
-process.on('unhandledRejection', (reason) => {
-  logError('Unhandled rejection: ' + (reason && reason.message ? reason.message : String(reason)));
+process.on('uncaughtException', (err) => {
+  logError('UNCAUGHT EXCEPTION: ' + (err && err.stack ? err.stack : String(err)));
+  // Не роняем процесс — логируем и продолжаем
 });
 
-process.on('uncaughtException', (err) => {
-  logError('Uncaught exception: ' + (err && err.message ? err.message : String(err)));
-  // Не роняем процесс — логируем и продолжаем
+process.on('unhandledRejection', (reason) => {
+  logError('UNHANDLED REJECTION: ' + (reason && reason.stack ? reason.stack : String(reason)));
 });
 
 // --- Простой HTTP сервер для пинга (чтобы Render не засыпал) ---
@@ -1786,7 +1829,6 @@ async function startBot() {
 }
 
 // Обработчик остановки бота — перезапуск через 5 секунд
-bot.stop('stopped').then(() => {}).catch(() => {});
 bot.on('stopped', async () => {
   isBotRunning = false;
   console.log('⚠️ Бот остановлен, перезапуск через 5 секунд...');

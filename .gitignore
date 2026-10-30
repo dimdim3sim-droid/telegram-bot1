@@ -5,7 +5,5 @@ bot.log
 bot.pid
 data.json
 *.bak
-start-bot.sh
-watchdog.sh
 .polydev/
 .DS_Store
