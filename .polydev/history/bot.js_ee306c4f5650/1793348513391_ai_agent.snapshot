@@ -5,7 +5,7 @@ const path = require('path');
 const BOT_TOKEN = process.env.BOT_TOKEN || '9228974259:AAE5v1pBy4P4L7ksSqwAZOltDyY2AopATvY';
 const MAIN_ADMIN = '7774448780';
 const COMMISSION = 0.05;
-const DATA_FILE = path.join(__dirname, 'data.json');
+const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
 const HELPER_LINK = 'https://t.me/helperxaze';
 const FISH_COOLDOWN = 12 * 60 * 60 * 1000;
 
@@ -42,6 +42,8 @@ const fishingCooldown = new Map();
 const userTasksClaimed = new Map();
 const userInvested = new Map();
 const userCompletedOrders = new Map();
+const paymentClaims = new Map(); // uid -> {at} — заявки на ручное пополнение
+const manualCredits = []; // {uid, amount, note, at} — лог ручных начислений
 
 const FISH = [
   { name: 'Карась', rarity: 'common', emoji: '🐟', value: 1 },
@@ -114,14 +116,16 @@ function t(uid, key) { return (L[getLang(uid)] || L.ru)[key] || key; }
 
 const AGREEMENT = `📜 Пользовательское соглашение / User Agreement
 
-1. Сервис — площадка для заказов и выполнения работ за Telegram Stars.
-2. Комиссия сервиса — 5% от суммы заказа.
-3. Исполнитель обязуется выполнить заказ качественно.
-4. Оплата только реальными Telegram Stars.
-5. Запрещены мошенничество, спам, незаконный контент.
-6. Администрация может забанить/ограничить пользователя.
-7. Споры разрешаются администрацией.
-8. Игровая валюта (монеты) зарабатывается за задания.`;
+1. Сервис — площадка для заказов и выполнения работ. Внутри бота используется игровая валюта (⭐ звёзды и 🪙 монеты).
+2. Звёзды внутри бота — игровая валюта. Пополняется за реальные Telegram Stars, отправляемые в канал платежей: https://t.me/stars_povelitel . После подтверждения администрацией баланс зачисляется в боте.
+3. Минимальная стоимость заказа за звёзды — 20 ⭐.
+4. Комиссия сервиса — от 5% и может доходить до 30%, но не более 30% от суммы операции. Размер комиссии определяется администрацией.
+5. Выплаты исполнителям (реальные звёзды) производятся администрацией вручную после выполнения заказа.
+6. Возвраты средств не производятся. Все операции с игровой валютой необратимы.
+7. Запрещены: мошенничество, спам, оскорбления, незаконный контент, обман других пользователей.
+8. Администрация вправе в любой момент забанить, ограничить или изменить баланс пользователя при нарушении правил или подозрении в обмане.
+9. Решения администрации по спорам окончательны. Администрация не несёт ответственности за действия пользователей, задержки выплат, технические сбои и утрату игровой валюты.
+10. Пользуясь ботом, ты подтверждаешь, что ознакомился с условиями и принимаешь их полностью.`;
 
 function getLang(uid) { return userLang.get(String(uid)) || 'ru'; }
 function setLang(uid, l) { userLang.set(String(uid), l); saveState(); }
@@ -159,6 +163,8 @@ function loadState() {
     userTasksClaimed.clear(); (d.userTasksClaimed || []).forEach(([uid, arr]) => userTasksClaimed.set(uid, new Set(arr)));
     userInvested.clear(); (d.userInvested || []).forEach(([uid, n]) => userInvested.set(uid, n));
     userCompletedOrders.clear(); (d.userCompletedOrders || []).forEach(([uid, n]) => userCompletedOrders.set(uid, n));
+    paymentClaims.clear(); (d.paymentClaims || []).forEach(([uid, c]) => paymentClaims.set(uid, c));
+    manualCredits.length = 0; (d.manualCredits || []).forEach(c => manualCredits.push(c));
   } catch (e) { console.error('State load error:', e.message); }
 }
 
@@ -184,6 +190,8 @@ function saveState() {
       userTasksClaimed: [...userTasksClaimed.entries()].map(([uid, set]) => [uid, [...set]]),
       userInvested: [...userInvested.entries()],
       userCompletedOrders: [...userCompletedOrders.entries()],
+      paymentClaims: [...paymentClaims.entries()],
+      manualCredits: manualCredits.slice(-500),
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(data));
   } catch (e) { console.error('State save error:', e.message); }
@@ -248,6 +256,7 @@ function mainMenu(uid) {
     [Markup.button.callback('📰 Новости', 'news'), Markup.button.callback('💰 Донат', 'donate')],
     [Markup.button.callback('📧 Почта', 'mail'), Markup.button.callback('👤 Профиль', 'profile')],
     [Markup.button.callback(t(uid, 'balance'), 'balance'), Markup.button.callback(t(uid, 'topup'), 'topup_help')],
+    [Markup.button.callback('💳 Я оплатил в канале', 'paid_claim')],
     [Markup.button.callback(t(uid, 'suggest'), 'suggest_idea'), Markup.button.callback(t(uid, 'agreement'), 'show_agreement')],
     [Markup.button.callback(t(uid, 'lang'), 'lang_switch')],
   ];
@@ -317,7 +326,14 @@ bot.action('show_agreement', async (ctx) => {
 });
 bot.action('topup_help', async (ctx) => {
   await ctx.answerCbQuery();
-  await editMsg(ctx, '💳 Пополнение только реальными Telegram Stars:\n\n/pay 10\n/pay 50\n/pay 100\n\nПосле оплаты Stars зачислятся на баланс автоматически.\n\nTop up with real Telegram Stars only.', backKeyboard(ctx.from.id));
+  const uid = ctx.from.id;
+  const text = '💳 Пополнение баланса (⭐ звёзды — игровая валюта бота)\n\n1️⃣ Переведи реальные Telegram Stars в канал платежей\n2️⃣ Вернись в бота и нажми «💳 Я оплатил в канале»\n3️⃣ Администрация проверит и начислит баланс\n\n⏱️ Зачисление после подтверждения.\n\nTop up your in-bot game stars via the payment channel.';
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.url('⭐ Перевести звёзды', 'https://t.me/stars_povelitel')],
+    [Markup.button.callback('💳 Я оплатил в канале', 'paid_claim')],
+    [Markup.button.callback(t(uid, 'back'), 'back_main')],
+  ]);
+  await editMsg(ctx, text, kb);
 });
 bot.action('lang_switch', async (ctx) => {
   await ctx.answerCbQuery();
@@ -597,11 +613,25 @@ bot.action(/^view_video_(\d+)$/, async (ctx) => {
   const id = parseInt(ctx.match[1]);
   const video = videos.get(id);
   if (!video) { await editMsg(ctx, '❌ Видео не найдено. / Video not found.', mainMenu(uid)); return; }
-  await editMsg(ctx, `📺 ${video.title}\n\nАвтор: ${video.creatorName}\nИнвестиций: ${video.invested || 0} 🪙\n\n${video.description || ''}`, Markup.inlineKeyboard([
+  const kb = Markup.inlineKeyboard([
     [Markup.button.callback('💰 Инвестировать / Invest', `invest_${id}`)],
     [Markup.button.callback('👤 Профиль автора / Author profile', `profile_view_${video.creatorId}`)],
     [Markup.button.callback(t(uid, 'back'), 'back_main')],
-  ]));
+  ]);
+  const caption = `📺 ${video.title}\n\nАвтор: ${video.creatorName}\nИнвестиций: ${video.invested || 0} 🪙\n\n${video.description || ''}`.slice(0, 1024);
+  // Показываем реальный ролик, если он был загружен
+  if (video.mediaFileId) {
+    try {
+      if (video.mediaType === 'photo') await ctx.replyWithPhoto(video.mediaFileId, { caption, reply_markup: kb });
+      else if (video.mediaType === 'video') await ctx.replyWithVideo(video.mediaFileId, { caption, reply_markup: kb });
+      else await ctx.replyWithDocument(video.mediaFileId, { caption, reply_markup: kb });
+      return;
+    } catch (e) {
+      await ctx.reply(`⚠️ Не удалось загрузить ролик: ${e.message}\n\n${caption}`, kb);
+      return;
+    }
+  }
+  await editMsg(ctx, `📺 ${video.title}\n\nАвтор: ${video.creatorName}\nИнвестиций: ${video.invested || 0} 🪙\n\n${video.description || ''}\n\n⚠️ Ролька нет — только текст. / No file, text only.`, kb);
 });
 
 bot.action(/^invest_(\d+)$/, async (ctx) => {
@@ -663,16 +693,21 @@ bot.action('admin_panel', async (ctx) => {
 • Заказов: ${totalOrders} (открыто: ${openOrders}, выполнено: ${completedOrders})
 • Звёзд на балансах: ${totalStars}⭐
 • Монет: ${totalCoins} 🪙
-• Комиссия заработана: ${commissionEarned}⭐
-• Реальных пополнений: ${transactions.filter(t => t.type === 'topup').length}
+ • Комиссия заработана: ${commissionEarned}⭐
+ • Реальных пополнений: ${transactions.filter(t => t.type === 'topup').length}
+ • Ручных начислений: ${manualCredits.length}
+ • Ожидают заявки: ${paymentClaims.size}
 
-🔧 Действия:`;
+ 🔧 Действия:`;
   const rows = [
     [Markup.button.callback('📊 Все заказы / Orders', 'admin_orders')],
     [Markup.button.callback('👥 Пользователи / Users', 'admin_users')],
     [Markup.button.callback('🚫 Баны / Bans', 'admin_bans')],
     [Markup.button.callback('⛔ Ограничения / Restrict', 'admin_restrict')],
     [Markup.button.callback('💳 Пополнения / Topups', 'admin_topups')],
+    [Markup.button.callback('💳 Заявки (канал) / Claims', 'admin_claims')],
+    [Markup.button.callback('📰 Новости / News', 'admin_news')],
+    [Markup.button.callback('📺 Видео / Videos', 'admin_videos')],
     [Markup.button.callback('👑 Управление админами / Admins', 'admin_manage')],
     [Markup.button.callback(t(uid, 'back'), 'back_main')],
   ];
@@ -686,19 +721,33 @@ bot.action('admin_orders', async (ctx) => {
   if (list.length === 0) { await editMsg(ctx, 'Нет заказов. / No orders.', backKeyboard(ctx.from.id)); return; }
   let text = '📋 Последние заказы / Recent orders:\n\n';
   for (const o of list) text += `#${o.id} ${o.status} | ${o.currency === 'coins' ? '🪙' : '⭐'} ${o.amount} | ${o.description.slice(0, 40)}\n🔗 ${orderLink(o.id)}\n\n`;
-  await editMsg(ctx, text, backKeyboard(ctx.from.id));
+  const buttons = list.map(o => [Markup.button.callback(`🗑️ Удалить #${o.id}`, `del_order_${o.id}`)]);
+  buttons.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
+  await editMsg(ctx, text, Markup.inlineKeyboard(buttons));
 });
 
 bot.action('admin_users', async (ctx) => {
   await ctx.answerCbQuery();
   if (!isAdmin(ctx.from.id)) return;
+  const list = [];
   let text = `👥 Пользователи / Users: ${users.size}\n\n`;
   let i = 0;
   for (const u of users) {
     if (i++ > 50) break;
     text += `${u} — ${getStars(u)}⭐ ${getCoins(u)}🪙 ${banned.has(u) ? '🚫' : ''} ${restricted.has(u) ? '⛔' : ''} ${admins.has(u) ? '👑' : ''}\n`;
+    list.push([Markup.button.callback(`💰 Выдать ${u}`, `cred_user_${u}`)]);
   }
-  await editMsg(ctx, text, backKeyboard(ctx.from.id));
+  list.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
+  await editMsg(ctx, text, Markup.inlineKeyboard(list));
+});
+
+bot.action(/^cred_user_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const uid = ctx.from.id;
+  const target = ctx.match[1];
+  userState.set(uid, { mode: 'cred_amount', target });
+  await ctx.reply(`💰 Сколько ⭐ начислить пользователю ${target}?\nВведи число (например, 70).\nОтмена: /cancel`);
 });
 
 bot.action('admin_bans', async (ctx) => {
@@ -721,6 +770,142 @@ bot.action('admin_topups', async (ctx) => {
   let text = '💳 Последние пополнения / Recent topups:\n\n';
   for (const t of list) text += `${t.uid} +${t.amount}⭐ (${new Date(t.at).toLocaleString('ru-RU')})\n`;
   await editMsg(ctx, text, backKeyboard(ctx.from.id));
+});
+
+// ---- Ручные платежи через канал (заявки) ----
+bot.action('paid_claim', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  if (paymentClaims.has(String(uid))) {
+    await editMsg(ctx, '⏳ У тебя уже есть заявка на проверку. Администратор скоро рассмотрит её. / You already have a pending claim.', backKeyboard(uid));
+    return;
+  }
+  paymentClaims.set(String(uid), { at: Date.now() });
+  saveState();
+  await editMsg(ctx, '✅ Заявка отправлена!\n\nАдминистратор проверит твои платежи в канале и начислит звёзды.\n\n📌 Как это работает:\n1. Ты платишь за сообщения в канале\n2. Жмёшь эту кнопку\n3. Админ проверяет и выдаёт звёзды\n\nClaim sent! The admin will verify your channel payments and credit your stars.', backKeyboard(uid));
+  // Уведомляем всех админов
+  for (const a of admins) {
+    try {
+      await bot.telegram.sendMessage(a, `💳 Новая заявка на ручное пополнение / New manual topup claim:\n\n👤 ${ctx.from.first_name || ''} ${ctx.from.last_name || ''}\n🆔 ${uid}\n🔗 t.me/${ctx.from.username || '—'}\n\n📺 Канал для проверки: https://t.me/stars_povelitel\n\nНачисли звёзды: /cred ${uid} <сумма>`, Markup.inlineKeyboard([[Markup.button.callback('✅ К заявкам / To claims', 'admin_claims')]]));
+    } catch (e) {}
+  }
+});
+
+bot.action('admin_claims', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const claims = [...paymentClaims.entries()];
+  if (claims.length === 0) {
+    let text = '💳 Заявок пока нет. / No claims yet.\n\nЧтобы начислить звёзды вручную: /cred <userId> <сумма> [заметка]';
+    if (manualCredits.length) {
+      text += '\n\n📜 Последние ручные начисления / Recent manual credits:\n';
+      manualCredits.slice(-10).reverse().forEach(c => { text += `${c.uid} +${c.amount}⭐ (${c.note || '—'}) — ${new Date(c.at).toLocaleString('ru-RU')}\n`; });
+    }
+    await editMsg(ctx, text, backKeyboard(ctx.from.id));
+    return;
+  }
+  let text = `💳 Заявки на ручное пополнение / Manual topup claims: ${claims.length}\n\n`;
+  const buttons = [];
+  claims.forEach(([u, c]) => {
+    text += `👤 ${u} — ${new Date(c.at).toLocaleString('ru-RU')}\n`;
+    buttons.push([Markup.button.callback(`✅ Выдать / Credit ${u}`, `claim_credit_${u}`), Markup.button.callback(`❌ Отклонить / Deny ${u}`, `claim_deny_${u}`)]);
+  });
+  if (manualCredits.length) {
+    text += '\n📜 Последние ручные начисления / Recent manual credits:\n';
+    manualCredits.slice(-5).reverse().forEach(c => { text += `${c.uid} +${c.amount}⭐ (${c.note || '—'})\n`; });
+  }
+  buttons.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
+  await editMsg(ctx, text, Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^claim_credit_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const target = ctx.match[1];
+  paymentClaims.delete(target);
+  saveState();
+  userState.set(ctx.from.id, { mode: 'cred_amount', target, note: 'Заявка из канала' });
+  await ctx.reply(`💳 Сколько ⭐ начислить пользователю ${target}?\nВведи число (например, 70).\nОтмена: /cancel`);
+});
+
+bot.action(/^claim_deny_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const target = ctx.match[1];
+  paymentClaims.delete(target);
+  saveState();
+  try { await bot.telegram.sendMessage(target, '❌ Заявка отклонена. Проверь, что все платежи в канале прошли, и попробуй снова. / Claim denied. Make sure all channel payments went through and try again.'); } catch (e) {}
+  await editMsg(ctx, `❌ Заявка пользователя ${target} отклонена. / Claim denied.`, Markup.inlineKeyboard([[Markup.button.callback('💳 К заявкам / To claims', 'admin_claims')]]));
+});
+
+bot.command('cred', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+  const parts = ctx.message.text.split(/\s+/);
+  const target = parts[1];
+  const amount = parseInt(parts[2]);
+  const note = parts.slice(3).join(' ') || 'Ручное начисление';
+  if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /cred <userId> <сумма> [заметка]\nПример: /cred 123456 70 7 сообщений в канале'); return; }
+  addStars(target, amount);
+  manualCredits.push({ uid: String(target), amount, note, at: Date.now() });
+  paymentClaims.delete(String(target));
+  saveState();
+  await ctx.reply(`✅ Начислено ${amount}⭐ пользователю ${target}.\n📝 ${note}`);
+  try { await bot.telegram.sendMessage(target, `✅ Тебе начислено ${amount} ⭐\n📝 ${note}\n💰 Баланс: ${getStars(target)} ⭐`); } catch (e) {}
+});
+
+bot.action('admin_news', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  if (news.length === 0) { await editMsg(ctx, '📰 Новостей нет. / No news.', backKeyboard(ctx.from.id)); return; }
+  const buttons = news.slice(-20).reverse().map((n, i) => [Markup.button.callback(`🗑️ ${n.text.slice(0, 30)}`, `del_news_${i}`)]);
+  buttons.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
+  let text = '📰 Новости / News:\n\n';
+  news.slice(-20).reverse().forEach((n, i) => { text += `${i + 1}. ${n.text}\n`; });
+  await editMsg(ctx, text, Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^del_news_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const idx = parseInt(ctx.match[1]);
+  const reversed = news.slice(-20).reverse();
+  const target = reversed[idx];
+  if (target) {
+    const realIdx = news.indexOf(target);
+    if (realIdx >= 0) news.splice(realIdx, 1);
+    saveState();
+  }
+  await editMsg(ctx, '✅ Новость удалена. / News deleted.', Markup.inlineKeyboard([[Markup.button.callback('📰 Назад / Back', 'admin_news')]]));
+});
+
+bot.action('admin_videos', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const list = [...videos.values()].slice(-20).reverse();
+  if (list.length === 0) { await editMsg(ctx, '📺 Видео нет. / No videos.', backKeyboard(ctx.from.id)); return; }
+  const buttons = list.map(v => [Markup.button.callback(`🗑️ ${v.title}`, `del_video_${v.id}`)]);
+  buttons.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
+  let text = '📺 Видео / Videos:\n\n';
+  list.forEach(v => { text += `#${v.id} ${v.title} (${v.invested || 0}🪙) by ${v.creatorName}\n`; });
+  await editMsg(ctx, text, Markup.inlineKeyboard(buttons));
+});
+
+bot.action(/^del_video_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const id = parseInt(ctx.match[1]);
+  videos.delete(id);
+  saveState();
+  await editMsg(ctx, '✅ Видео удалено. / Video deleted.', Markup.inlineKeyboard([[Markup.button.callback('📺 Назад / Back', 'admin_videos')]]));
+});
+
+bot.action(/^del_order_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const id = parseInt(ctx.match[1]);
+  orders.delete(id);
+  saveState();
+  await editMsg(ctx, '✅ Заказ удалён. / Order deleted.', Markup.inlineKeyboard([[Markup.button.callback('📋 Назад / Back', 'admin_orders')]]));
 });
 
 bot.action('admin_manage', async (ctx) => {
@@ -775,6 +960,41 @@ async function handleAdminCommand(ctx, text) {
 Комиссия / Commission: ${[...orders.values()].filter(o=>o.status==='completed').reduce((a,o)=>a+(o.commission||0),0)}
 Реальных пополнений / Topups: ${transactions.filter(t=>t.type==='topup').length}
 Приглашений / Referrals: ${[...referralCount.values()].reduce((a,b)=>a+b,0)}`);
+  } else if (cmd === '/delnews') {
+    const idx = parseInt(parts[1]);
+    if (isNaN(idx) || idx < 1 || idx > news.length) { await ctx.reply('Использование: /delnews <номер>'); return; }
+    const removed = news.splice(news.length - idx, 1);
+    saveState();
+    await ctx.reply(`✅ Новость #${idx} удалена. / News deleted.`);
+  } else if (cmd === '/delvideo') {
+    const id = parseInt(parts[1]);
+    if (!videos.has(id)) { await ctx.reply('❌ Видео не найдено. / Video not found.'); return; }
+    videos.delete(id); saveState();
+    await ctx.reply(`✅ Видео #${id} удалено. / Video deleted.`);
+  } else if (cmd === '/delorder') {
+    const id = parseInt(parts[1]);
+    if (!orders.has(id)) { await ctx.reply('❌ Заказ не найден. / Order not found.'); return; }
+    orders.delete(id); saveState();
+    await ctx.reply(`✅ Заказ #${id} удалён. / Order deleted.`);
+  } else if (cmd === '/addstars') {
+    if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
+    const target = parts[1];
+    const amount = parseInt(parts[2]);
+    if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /addstars <userId> <сумма>'); return; }
+    addStars(target, amount);
+    transactions.push({ uid: target, amount, type: 'manual_add', at: Date.now() });
+    saveState();
+    await ctx.reply(`✅ Выдано ${amount} ⭐ пользователю ${target}. Баланс: ${getStars(target)} ⭐`);
+    try { await bot.telegram.sendMessage(target, `🎁 Тебе выдано ${amount} ⭐ от администратора.`); } catch (e) {}
+  } else if (cmd === '/takestars') {
+    if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
+    const target = parts[1];
+    const amount = parseInt(parts[2]);
+    if (!target || !amount || amount <= 0) { await ctx.reply('Использование: /takestars <userId> <сумма>'); return; }
+    if (getStars(target) < amount) { await ctx.reply('❌ Недостаточно звёзд у пользователя.'); return; }
+    addStars(target, -amount);
+    saveState();
+    await ctx.reply(`✅ Снято ${amount} ⭐ с пользователя ${target}. Баланс: ${getStars(target)} ⭐`);
   } else if (cmd === '/gift') {
     const target = parts[1];
     const amount = parseInt(parts[2]);
@@ -813,11 +1033,30 @@ bot.on('text', async (ctx) => {
   const state = userState.get(uid);
   const text = ctx.message.text;
 
+  if (text === '/cancel' || text === 'Отмена') {
+    userState.delete(uid);
+    await ctx.reply('❌ Отменено. / Cancelled.', mainMenu(uid));
+    return;
+  }
+
+  if (state && state.mode === 'cred_amount' && isAdmin(uid)) {
+    const amount = parseInt(text);
+    const target = state.target;
+    userState.delete(uid);
+    if (!amount || amount <= 0) { await ctx.reply('❌ Введи положительное число. / Enter a positive number.'); return; }
+    addStars(target, amount);
+    manualCredits.push({ uid: String(target), amount, note: state.note || 'Ручное начисление', at: Date.now() });
+    saveState();
+    await ctx.reply(`✅ Начислено ${amount}⭐ пользователю ${target}.`);
+    try { await bot.telegram.sendMessage(target, `✅ Тебе начислено ${amount} ⭐\n💰 Баланс: ${getStars(target)} ⭐`); } catch (e) {}
+    return;
+  }
+
   if (state && state.mode === 'create_desc') {
     state.description = text;
     state.mode = 'create_amount';
     userState.set(uid, state);
-    await editPrompt(uid, '⭐ Сколько звёзд/монет заплатить за заказ? (число) / How many stars/coins?', backKeyboard(uid));
+    await editPrompt(uid, '⭐ Сколько звёзд/монет заплатить за заказ? (число)\n📌 Минимум за звёзды — 20 ⭐ / How many stars/coins? (min 20 for stars)', backKeyboard(uid));
     return;
   }
 
@@ -860,11 +1099,23 @@ bot.on('text', async (ctx) => {
     return;
   }
   if (state && state.mode === 'video_desc') {
-    const id = nextVideoId++;
-    videos.set(id, { id, title: state.title, description: text, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now() });
-    saveState();
-    userState.delete(uid);
-    await editPrompt(uid, `✅ Видео "${state.title}" создано! / Video created!`, mainMenu(uid));
+    state.description = text;
+    state.mode = 'video_upload';
+    userState.set(uid, state);
+    await editPrompt(uid, '🎬 Теперь пришли видеоролик (видео или файл) — он будет показываться зрителям.\nМожно пропустить: /skip\n\nNow send your video (or file) — viewers will see it. Skip: /skip', backKeyboard(uid));
+    return;
+  }
+
+  if (state && state.mode === 'video_upload') {
+    if (text.toLowerCase() === '/skip') {
+      const id = nextVideoId++;
+      videos.set(id, { id, title: state.title, description: state.description, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now() });
+      saveState();
+      userState.delete(uid);
+      await editPrompt(uid, `✅ Видео "${state.title}" создано (без ролика)! / Video created (no file)!`, mainMenu(uid));
+      return;
+    }
+    await editPrompt(uid, '❌ Пришли именно видео (файл), а не текст.\nИли /skip, чтобы создать без ролика.\n\nSend a video file, not text. Or /skip to create without a file.', backKeyboard(uid));
     return;
   }
 
@@ -958,6 +1209,24 @@ bot.on('text', async (ctx) => {
 async function handleMedia(ctx, type) {
   const uid = ctx.from.id;
   const state = userState.get(uid);
+
+  // Создание видео в «Интернете» — загрузка ролика
+  if (state && state.mode === 'video_upload') {
+    if (type === 'photo') {
+      await editPrompt(uid, '❌ Пришли именно видео (не фото).\nИли /skip, чтобы создать без ролика.\n\nSend a video file (not a photo). Or /skip.', backKeyboard(uid));
+      return true;
+    }
+    let fileId = null;
+    if (type === 'video') fileId = ctx.message.video.file_id;
+    else if (type === 'document') fileId = ctx.message.document.file_id;
+    const id = nextVideoId++;
+    videos.set(id, { id, title: state.title, description: state.description, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now(), mediaType: type, mediaFileId: fileId });
+    saveState();
+    userState.delete(uid);
+    await editPrompt(uid, `✅ Видео "${state.title}" создано с роликом! / Video created with file!`, mainMenu(uid));
+    return true;
+  }
+
   if (!state || state.mode !== 'submit') return false;
   const order = orders.get(state.orderId);
   if (!order) { userState.delete(uid); await editPrompt(uid, '❌ Заказ не найден. / Order not found.', mainMenu(uid)); return true; }
@@ -997,9 +1266,14 @@ bot.action('order_currency_stars', async (ctx) => {
   const uid = ctx.from.id;
   const st = userState.get(uid);
   if (!st || st.mode !== 'create_currency') { await editMsg(ctx, menuText(uid), mainMenu(uid)); return; }
+  if (st.amount < 20) {
+    userState.delete(uid);
+    await editMsg(ctx, `❌ Минимальная стоимость заказа за звёзды — 20 ⭐. Ты указал ${st.amount}.\nСоздай заново или выбери монеты.`, mainMenu(uid));
+    return;
+  }
   if (getStars(uid) < st.amount) {
     userState.delete(uid);
-    await editMsg(ctx, `❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐. Пополни реально: /pay ${st.amount - getStars(uid)}`, mainMenu(uid));
+    await editMsg(ctx, `❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐.\nПополни: переведи реальные Stars в канал https://t.me/stars_povelitel и нажми «💳 Я оплатил в канале».\nНе хватает: ${st.amount - getStars(uid)} ⭐`, mainMenu(uid));
     return;
   }
   const commission = Math.ceil(st.amount * COMMISSION);
@@ -1037,17 +1311,11 @@ bot.action('order_currency_coins', async (ctx) => {
 // ---- Real Stars payment ----
 bot.command('pay', async (ctx) => {
   const uid = ctx.from.id;
-  const parts = ctx.message.text.split(' ');
-  const amount = parseInt(parts[1]);
-  if (!amount || amount <= 0) { await ctx.reply('Использование: /pay <сумма в звёздах> / Usage: /pay <amount>'); return; }
-  await ctx.replyWithInvoice({
-    title: 'Пополнение баланса / Top up',
-    description: `Пополнение на ${amount} Telegram Stars`,
-    payload: `topup_${uid}_${amount}_${Date.now()}`,
-    currency: 'XTR',
-    prices: [{ label: 'Telegram Stars', amount }],
-    provider_token: '',
-  });
+  await ctx.reply('💳 Пополнение баланса (⭐ звёзды — игровая валюта бота)\n\n1️⃣ Переведи реальные Telegram Stars в канал платежей\n2️⃣ Вернись в бота и нажми «💳 Я оплатил в канале»\n3️⃣ Администрация проверит и начислит баланс', Markup.inlineKeyboard([
+    [Markup.button.url('⭐ Перевести звёзды', 'https://t.me/stars_povelitel')],
+    [Markup.button.callback('💳 Я оплатил в канале', 'paid_claim')],
+    [Markup.button.callback('👋 Главное меню', 'back_main')],
+  ]));
 });
 
 bot.on('pre_checkout_query', async (ctx) => {
@@ -1058,15 +1326,62 @@ bot.on('successful_payment', async (ctx) => {
   const uid = ctx.from.id;
   const payment = ctx.message.successful_payment;
   const amount = payment.total_amount;
-  addStars(uid, amount);
-  transactions.push({ uid: String(uid), amount, type: 'topup', at: Date.now(), chargeId: payment.telegram_payment_charge_id });
+  const commission = Math.ceil(amount * 0.05);
+  const credited = amount - commission;
+  addStars(uid, credited);
+  transactions.push({ uid: String(uid), amount, credited, commission, type: 'topup', at: Date.now(), chargeId: payment.telegram_payment_charge_id });
   saveState();
-  await ctx.reply(`✅ Баланс пополнен на ${amount} ⭐\n💰 Текущий баланс: ${getStars(uid)} ⭐`, mainMenu(uid));
-  try { await bot.telegram.sendMessage(MAIN_ADMIN, `💰 Реальное пополнение: ${ctx.from.first_name} (${uid}) +${amount}⭐`); } catch (e) {}
+  await ctx.reply(`✅ Оплачено ${amount} ⭐\n💸 Комиссия сервиса (5%): ${commission} ⭐\n💰 Зачислено на баланс: ${credited} ⭐\n💰 Текущий баланс: ${getStars(uid)} ⭐`, mainMenu(uid));
+  try { await bot.telegram.sendMessage(MAIN_ADMIN, `💰 Реальное пополнение: ${ctx.from.first_name} (${uid}) оплатил ${amount}⭐, зачислено ${credited}⭐ (комиссия ${commission}⭐)`); } catch (e) {}
+});
+
+bot.command('transfer', async (ctx) => {
+  const uid = ctx.from.id;
+  const parts = ctx.message.text.split(' ');
+  const target = parts[1];
+  const amount = parseInt(parts[2]);
+  if (!target || !amount || amount <= 0) {
+    await ctx.reply('Перевод звёзд другому пользователю:\n/transfer <userId> <сумма>\n\nПример: /transfer 123456789 10\n\nКомиссия 5% удерживается с отправителя.');
+    return;
+  }
+  if (String(target) === String(uid)) { await ctx.reply('❌ Нельзя перевести самому себе.'); return; }
+  if (getStars(uid) < amount) { await ctx.reply(`❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐`); return; }
+  const commission = Math.ceil(amount * 0.05);
+  const received = amount - commission;
+  addStars(uid, -amount);
+  addStars(target, received);
+  transactions.push({ uid: String(uid), target: String(target), amount, commission, type: 'transfer', at: Date.now() });
+  saveState();
+  await ctx.reply(`✅ Перевод выполнен!\n💸 Отправлено: ${amount} ⭐\n💸 Комиссия (5%): ${commission} ⭐\n📬 Получатель: ${received} ⭐\n💰 Твой баланс: ${getStars(uid)} ⭐`);
+  try { await bot.telegram.sendMessage(target, `📬 Тебе перевели ${received} ⭐ от пользователя ${uid}!`); } catch (e) {}
+  try { await bot.telegram.sendMessage(MAIN_ADMIN, `💸 Перевод: ${uid} → ${target}: ${amount}⭐ (комиссия ${commission}⭐)`); } catch (e) {}
+});
+
+// ---- Логирование ошибок и защита от падения ----
+const LOG_FILE = path.join(__dirname, 'bot.log');
+function logError(msg) {
+  try {
+    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch (e) {}
+  console.error(msg);
+}
+
+bot.on('error', (err) => {
+  logError('Bot error: ' + (err && err.message ? err.message : String(err)));
+});
+
+process.on('unhandledRejection', (reason) => {
+  logError('Unhandled rejection: ' + (reason && reason.message ? reason.message : String(reason)));
+});
+
+process.on('uncaughtException', (err) => {
+  logError('Uncaught exception: ' + (err && err.message ? err.message : String(err)));
+  // Не роняем процесс — логируем и продолжаем
 });
 
 bot.launch();
 console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
+logError('Bot launched OK');
 
 process.on('SIGINT', () => { saveState(); bot.stop('SIGINT'); });
 process.on('SIGTERM', () => { saveState(); bot.stop('SIGTERM'); });

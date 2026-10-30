@@ -44,6 +44,8 @@ const userInvested = new Map();
 const userCompletedOrders = new Map();
 const paymentClaims = new Map(); // uid -> {at} — заявки на ручное пополнение
 const manualCredits = []; // {uid, amount, note, at} — лог ручных начислений
+const userInfos = new Map(); // uid -> {username, name, firstSeen}
+const deniedClaims = new Map(); // uid -> количество отклонённых (ложных) заявок
 
 const FISH = [
   { name: 'Карась', rarity: 'common', emoji: '🐟', value: 1 },
@@ -165,6 +167,8 @@ function loadState() {
     userCompletedOrders.clear(); (d.userCompletedOrders || []).forEach(([uid, n]) => userCompletedOrders.set(uid, n));
     paymentClaims.clear(); (d.paymentClaims || []).forEach(([uid, c]) => paymentClaims.set(uid, c));
     manualCredits.length = 0; (d.manualCredits || []).forEach(c => manualCredits.push(c));
+    userInfos.clear(); (d.userInfos || []).forEach(([uid, info]) => userInfos.set(uid, info));
+    deniedClaims.clear(); (d.deniedClaims || []).forEach(([uid, n]) => deniedClaims.set(uid, n));
   } catch (e) { console.error('State load error:', e.message); }
 }
 
@@ -192,6 +196,8 @@ function saveState() {
       userCompletedOrders: [...userCompletedOrders.entries()],
       paymentClaims: [...paymentClaims.entries()],
       manualCredits: manualCredits.slice(-500),
+      userInfos: [...userInfos.entries()],
+      deniedClaims: [...deniedClaims.entries()],
     };
     fs.writeFileSync(DATA_FILE, JSON.stringify(data));
   } catch (e) { console.error('State save error:', e.message); }
@@ -277,6 +283,10 @@ function backKeyboard(uid) {
 bot.start(async (ctx) => {
   const uid = ctx.from.id;
   users.add(String(uid));
+  const info = userInfos.get(String(uid)) || { firstSeen: Date.now() };
+  if (ctx.from.username) info.username = ctx.from.username;
+  info.name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
+  userInfos.set(String(uid), info);
   saveState();
   if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены. / You are banned.'); return; }
   if (!agreed.has(String(uid))) {
@@ -366,6 +376,22 @@ bot.action('profile_view_other', async (ctx) => {
   const uid = ctx.from.id;
   userState.set(uid, { mode: 'profile_view', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '🔍 Введи ID пользователя: / Enter user ID:', backKeyboard(uid));
+});
+
+bot.action(/^profile_view_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const target = ctx.match[1];
+  if (target === MAIN_ADMIN) { await editMsg(ctx, '🔒 Профиль администратора скрыт. / Admin profile hidden.', backKeyboard(uid)); return; }
+  const info = userInfos.get(target) || {};
+  const uname = info.username ? `@${info.username}` : '—';
+  const title = activeTitle.get(target) || 'Нет титула';
+  const fishCount = getFish(target).length;
+  const videoCount = [...videos.values()].filter(v => v.creatorId === target).length;
+  await editMsg(ctx, `👤 Профиль #${target} ${uname}\n\n⭐ Звёзды: ${getStars(target)}\n🪙 Монеты: ${getCoins(target)}\n🏷️ Титул: ${title}\n🎣 Рыб: ${fishCount}\n📺 Видео: ${videoCount}\n🤝 Приглашено: ${referralCount.get(target) || 0}`, Markup.inlineKeyboard([
+    [Markup.button.callback('💰 Донатить / Donate', `donate_to_${target}`)],
+    [Markup.button.callback(t(uid, 'back'), 'back_main')],
+  ]));
 });
 
 function tasksText(uid) {
@@ -734,7 +760,10 @@ bot.action('admin_users', async (ctx) => {
   let i = 0;
   for (const u of users) {
     if (i++ > 50) break;
-    text += `${u} — ${getStars(u)}⭐ ${getCoins(u)}🪙 ${banned.has(u) ? '🚫' : ''} ${restricted.has(u) ? '⛔' : ''} ${admins.has(u) ? '👑' : ''}\n`;
+    const info = userInfos.get(u) || {};
+    const uname = info.username ? `@${info.username}` : '—';
+    const uname2 = u === MAIN_ADMIN ? '👑' : '';
+    text += `${uname} (${u})${uname2} — ${getStars(u)}⭐ ${getCoins(u)}🪙 ${banned.has(u) ? '🚫' : ''} ${restricted.has(u) ? '⛔' : ''} ${admins.has(u) ? '👑' : ''}\n`;
     list.push([Markup.button.callback(`💰 Выдать ${u}`, `cred_user_${u}`)]);
   }
   list.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
@@ -833,9 +862,19 @@ bot.action(/^claim_deny_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const target = ctx.match[1];
   paymentClaims.delete(target);
+  const denied = (deniedClaims.get(target) || 0) + 1;
+  deniedClaims.set(target, denied);
   saveState();
-  try { await bot.telegram.sendMessage(target, '❌ Заявка отклонена. Проверь, что все платежи в канале прошли, и попробуй снова. / Claim denied. Make sure all channel payments went through and try again.'); } catch (e) {}
-  await editMsg(ctx, `❌ Заявка пользователя ${target} отклонена. / Claim denied.`, Markup.inlineKeyboard([[Markup.button.callback('💳 К заявкам / To claims', 'admin_claims')]]));
+  if (denied >= 2) {
+    banned.add(target);
+    saveState();
+    try { await bot.telegram.sendMessage(target, '🚫 Ты забанен за ложные заявки об оплате. / You are banned for false payment claims.'); } catch (e) {}
+    try { await bot.telegram.sendMessage(MAIN_ADMIN, `🚫 Пользователь ${target} забанен за повторные ложные заявки.`); } catch (e) {}
+    await editMsg(ctx, `🚫 Пользователь ${target} забанен за повторные ложные заявки. / Banned.`, Markup.inlineKeyboard([[Markup.button.callback('💳 К заявкам / To claims', 'admin_claims')]]));
+    return;
+  }
+  try { await bot.telegram.sendMessage(target, `❌ Заявка отклонена. Проверь, что все платежи в канале прошли.\n\n⚠️ Предупреждение ${denied}/2: повторная ложная заявка — бан. / Denied. Warning ${denied}/2: next false claim = BAN.`); } catch (e) {}
+  await editMsg(ctx, `❌ Заявка пользователя ${target} отклонена. Предупреждение ${denied}/2. / Claim denied. Warning ${denied}/2.`, Markup.inlineKeyboard([[Markup.button.callback('💳 К заявкам / To claims', 'admin_claims')]]));
 });
 
 bot.command('cred', async (ctx) => {
