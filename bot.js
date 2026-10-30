@@ -3,7 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-const BOT_TOKEN = process.env.BOT_TOKEN || '9228974259:AAG0BazpYm22-ZFYZRX-KuCh6Vi1DyTb2hc';
+const BOT_TOKEN = process.env.BOT_TOKEN;
+if (!BOT_TOKEN) {
+  console.error('❌ ОШИБКА: BOT_TOKEN не найден! Установи переменную окружения BOT_TOKEN.');
+  process.exit(1);
+}
 const MAIN_ADMIN = '7774448780';
 const COMMISSION = 0.05;
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
@@ -47,6 +51,104 @@ const paymentClaims = new Map(); // uid -> {at} — заявки на ручно
 const manualCredits = []; // {uid, amount, note, at} — лог ручных начислений
 const userInfos = new Map(); // uid -> {username, name, firstSeen}
 const deniedClaims = new Map(); // uid -> количество отклонённых (ложных) заявок
+
+// ========== ЗАЩИТА: Rate limiting и безопасность ==========
+const commandCooldowns = new Map(); // uid -> { command, lastTime }
+const messageCounts = new Map(); // uid -> { count, resetTime }
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 минута
+const RATE_LIMIT_MAX = 20; // максимум команд в минуту
+const COMMAND_COOLDOWN = 3 * 1000; // 3 секунды между одинаковыми командами
+
+function checkRateLimit(uid, command) {
+  const now = Date.now();
+  const key = String(uid);
+
+  // Общий лимит сообщений
+  let msgData = messageCounts.get(key);
+  if (!msgData || now > msgData.resetTime) {
+    msgData = { count: 0, resetTime: now + RATE_LIMIT_WINDOW };
+    messageCounts.set(key, msgData);
+  }
+  msgData.count++;
+  if (msgData.count > RATE_LIMIT_MAX) {
+    return { ok: false, reason: 'Слишком много команд. Подождите минуту. / Too many commands. Wait a minute.' };
+  }
+
+  // Лимит на конкретную команду
+  const cdKey = `${key}:${command}`;
+  let cd = commandCooldowns.get(cdKey);
+  if (cd && now - cd < COMMAND_COOLDOWN) {
+    return { ok: false, reason: 'Не спамьте одной командой. / Do not spam the same command.' };
+  }
+  commandCooldowns.set(cdKey, now);
+
+  // Очистка старых записей кд (старше 1 минуты)
+  if (now % 10000 < 10) {
+    for (const [k, v] of commandCooldowns.entries()) {
+      if (now - v > 60000) commandCooldowns.delete(k);
+    }
+  }
+
+  return { ok: true };
+}
+
+function sanitizeInput(text) {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .replace(/[<>`\\]/g, '') // убрать потенциально опасные символы
+    .trim()
+    .slice(0, 1000); // лимит длины
+}
+
+function isValidUserId(id) {
+  return /^\d{5,15}$/.test(String(id));
+}
+
+// Middleware: защита всех команд и действий
+bot.use(async (ctx, next) => {
+  const uid = ctx.from ? ctx.from.id : null;
+  if (!uid) return next();
+
+  const isAdminUser = isAdmin(uid);
+
+  // Админы без лимитов (но с базовой проверкой)
+  if (!isAdminUser) {
+    const command = ctx.updateType === 'message' && ctx.message.text
+      ? ctx.message.text.split(' ')[0]
+      : ctx.updateType === 'callback_query' && ctx.callbackQuery.data
+      ? ctx.callbackQuery.data
+      : 'other';
+
+    const limit = checkRateLimit(uid, command);
+    if (!limit.ok) {
+      try { await ctx.reply(limit.reason); } catch (e) {}
+      return;
+    }
+  }
+
+  // Защита от обработки своих же сообщений ботом (предотвращение циклов)
+  if (ctx.updateType === 'message' && ctx.message.text === '/start autoping') {
+    return; // автопинг не обрабатываем как обычную команду
+  }
+
+  return next();
+});
+
+// Защита админ-команд: только MAIN_ADMIN может использовать критические команды
+const CRITICAL_ADMIN_CMDS = ['ban', 'unban', 'restrict', 'unrestrict', 'givestars', 'addadmin', 'removeadmin'];
+bot.use(async (ctx, next) => {
+  if (ctx.updateType === 'message' && ctx.message.text) {
+    const text = ctx.message.text;
+    const cmd = text.split(' ')[0].toLowerCase();
+    if (CRITICAL_ADMIN_CMDS.includes(cmd.slice(1))) {
+      if (String(ctx.from.id) !== MAIN_ADMIN) {
+        try { await ctx.reply('❌ Эта команда доступна только главному администратору.'); } catch (e) {}
+        return;
+      }
+    }
+  }
+  return next();
+});
 
 const FISH = [
   { name: 'Карась', rarity: 'common', emoji: '🐟', value: 1 },

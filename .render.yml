@@ -8,6 +8,6 @@ services:
     autoDeploy: true
     envVars:
       - key: BOT_TOKEN
-        value: "9228974259:AAG0BazpYm22-ZFYZRX-KuCh6Vi1DyTb2hc"
+        value: "YOUR_BOT_TOKEN_HERE"
       - key: NODE_ENV
         value: "production"
