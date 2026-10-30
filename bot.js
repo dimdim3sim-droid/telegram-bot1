@@ -115,13 +115,17 @@ bot.use(async (ctx, next) => {
   const uid = ctx.from ? ctx.from.id : null;
   if (!uid) return next();
 
-  // Сохраняем пользователя при любом взаимодействии
-  users.add(String(uid));
-  const info = userInfos.get(String(uid)) || { firstSeen: Date.now() };
-  if (ctx.from.username) info.username = ctx.from.username;
-  info.name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
-  userInfos.set(String(uid), info);
-  saveState();
+  try {
+    // Сохраняем пользователя при любом взаимодействии
+    users.add(String(uid));
+    const info = userInfos.get(String(uid)) || { firstSeen: Date.now() };
+    if (ctx.from.username) info.username = ctx.from.username;
+    info.name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
+    userInfos.set(String(uid), info);
+    saveState();
+  } catch (e) {
+    logError('Middleware user-save error: ' + (e && e.stack ? e.stack : String(e)));
+  }
 
   const isAdminUser = isAdmin(uid);
 
@@ -229,7 +233,15 @@ const L = {
   ru: { menu: '👋 Главное меню', balance: '💰 Баланс', stars: '⭐ Звёзды', coins: '🪙 Монеты', order: '📋 Заказать', execute: '⚡ Выполнить', shop: '🛒 Магазин', tasks: '🎯 Задания', lang: '🌐 Язык', suggest: '💡 Предложить идею', agreement: '📜 Соглашение', topup: '💳 Пополнить', admin: '👑 Админ-панель', back: '⬅️ Назад', choose: 'Выбирай действие:' },
   en: { menu: '👋 Main Menu', balance: '💰 Balance', stars: '⭐ Stars', coins: '🪙 Coins', order: '📋 Order', execute: '⚡ Execute', shop: '🛒 Shop', tasks: '🎯 Tasks', lang: '🌐 Language', suggest: '💡 Suggest idea', agreement: '📜 Agreement', topup: '💳 Top up', admin: '👑 Admin panel', back: '⬅️ Back', choose: 'Choose an action:' },
 };
-function t(uid, key) { return (L[getLang(uid)] || L.ru)[key] || key; }
+function t(uid, key) {
+  try {
+    const lang = getLang(uid);
+    const dict = L[lang] || L.ru;
+    return dict[key] || key;
+  } catch (e) {
+    return key;
+  }
+}
 
 const AGREEMENT = `📜 Пользовательское соглашение / User Agreement
 
@@ -245,7 +257,10 @@ const AGREEMENT = `📜 Пользовательское соглашение / 
 10. Прямой перевод звёзд от одного пользователя к другому в боте невозможен. Передача звёзд возможна только через покупку подарков/платных сообщений в Telegram, где звёзды списываются с отправителя и зачисляются получателю в рамках покупки контента. Администрация не несёт ответственности за такие операции и не участвует в них.
 11. Пользуясь ботом, ты подтверждаешь, что ознакомился с условиями и принимаешь их полностью.`;
 
-function getLang(uid) { return userLang.get(String(uid)) || 'ru'; }
+function getLang(uid) {
+  const lang = userLang.get(String(uid));
+  return (lang === 'ru' || lang === 'en') ? lang : 'ru';
+}
 function setLang(uid, l) { userLang.set(String(uid), l); saveState(); }
 
 function loadState() {
@@ -407,50 +422,56 @@ function backKeyboard(uid) {
 }
 
 bot.start(async (ctx) => {
-  const uid = ctx.from.id;
-  const text = ctx.message.text || '';
-  // Автопинг от самого бота — не отвечаем, просто сохраняем пользователя
-  if (uid === Number(MAIN_ADMIN) && (text === '/start autiking' || text === '🔄 Автопинг системы (keep-alive)')) {
-    users.add(String(uid));
-    saveState();
-    return;
-  }
-  users.add(String(uid));
-  const info = userInfos.get(String(uid)) || { firstSeen: Date.now() };
-  if (ctx.from.username) info.username = ctx.from.username;
-  info.name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
-  userInfos.set(String(uid), info);
-  saveState();
-  if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены. / You are banned.'); return; }
-  if (!agreed.has(String(uid))) {
-    await ctx.reply(AGREEMENT, Markup.inlineKeyboard([[Markup.button.callback('✅ Принимаю / Accept', 'agree_yes'), Markup.button.callback('❌ Отказываюсь / Decline', 'agree_no')]]));
-    return;
-  }
-  const payload = ctx.startPayload || '';
-  if (payload.startsWith('ref_')) {
-    const inviter = payload.split('_')[1];
-    if (inviter && inviter !== String(uid) && !invitedBy.has(String(uid))) {
-      invitedBy.set(String(uid), inviter);
-      if (!referrals.has(inviter)) referrals.set(inviter, new Set());
-      referrals.get(inviter).add(String(uid));
-      referralCount.set(inviter, (referralCount.get(inviter) || 0) + 1);
-      addCoins(inviter, 1);
+  const uid = ctx.from ? ctx.from.id : null;
+  if (!uid) return;
+  try {
+    const text = ctx.message ? (ctx.message.text || '') : '';
+    // Автопинг от самого бота — не отвечаем, просто сохраняем пользователя
+    if (uid === Number(MAIN_ADMIN) && (text === '/start autiking' || text === '🔄 Автопинг системы (keep-alive)')) {
+      users.add(String(uid));
       saveState();
-      try { await bot.telegram.sendMessage(inviter, `🎉 Новый приглашённый! +1 🪙\nВсего приглашено: ${referralCount.get(inviter)}`); } catch (e) {}
+      return;
     }
+    users.add(String(uid));
+    const info = userInfos.get(String(uid)) || { firstSeen: Date.now() };
+    if (ctx.from.username) info.username = ctx.from.username;
+    info.name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
+    userInfos.set(String(uid), info);
+    saveState();
+    if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены. / You are banned.'); return; }
+    if (!agreed.has(String(uid))) {
+      await ctx.reply(AGREEMENT, Markup.inlineKeyboard([[Markup.button.callback('✅ Принимаю / Accept', 'agree_yes'), Markup.button.callback('❌ Отказываюсь / Decline', 'agree_no')]]));
+      return;
+    }
+    const payload = (ctx.startPayload || '').toString();
+    if (payload.startsWith('ref_')) {
+      const inviter = payload.split('_')[1];
+      if (inviter && inviter !== String(uid) && !invitedBy.has(String(uid)) && /^\d+$/.test(inviter)) {
+        invitedBy.set(String(uid), inviter);
+        if (!referrals.has(inviter)) referrals.set(inviter, new Set());
+        referrals.get(inviter).add(String(uid));
+        referralCount.set(inviter, (referralCount.get(inviter) || 0) + 1);
+        addCoins(inviter, 1);
+        saveState();
+        try { await bot.telegram.sendMessage(inviter, `🎉 Новый приглашённый! +1 🪙\nВсего приглашено: ${referralCount.get(inviter)}`); } catch (e) {}
+      }
+    }
+    if (payload.startsWith('order_')) {
+      const id = parseInt(payload.split('_')[1]);
+      const order = orders.get(id);
+      if (!order) { await ctx.reply('❌ Заказ не найден. / Order not found.', mainMenu(uid)); return; }
+      let text = `📋 Заказ #${order.id}\n\n${order.description}\n\n${order.currency === 'coins' ? '🪙' : '⭐'} ${order.amount}\nСтатус: ${order.status}`;
+      const kb = order.status === 'open'
+        ? Markup.inlineKeyboard([[Markup.button.callback('⚡ Взять заказ / Take', `take_${order.id}`)], [Markup.button.callback(t(uid, 'back'), 'back_main')]])
+        : mainMenu(uid);
+      await ctx.reply(text, kb);
+      return;
+    }
+    await ctx.reply(menuText(uid), mainMenu(uid));
+  } catch (e) {
+    logError('bot.start error: ' + (e && e.stack ? e.stack : String(e)));
+    try { await ctx.reply('⚠️ Внутренняя ошибка при запуске. Попробуйте позже. / Internal error on start.'); } catch (err) {}
   }
-  if (payload.startsWith('order_')) {
-    const id = parseInt(payload.split('_')[1]);
-    const order = orders.get(id);
-    if (!order) { await ctx.reply('❌ Заказ не найден. / Order not found.', mainMenu(uid)); return; }
-    let text = `📋 Заказ #${order.id}\n\n${order.description}\n\n${order.currency === 'coins' ? '🪙' : '⭐'} ${order.amount}\nСтатус: ${order.status}`;
-    const kb = order.status === 'open'
-      ? Markup.inlineKeyboard([[Markup.button.callback('⚡ Взять заказ / Take', `take_${order.id}`)], [Markup.button.callback(t(uid, 'back'), 'back_main')]])
-      : mainMenu(uid);
-    await ctx.reply(text, kb);
-    return;
-  }
-  await ctx.reply(menuText(uid), mainMenu(uid));
 });
 
 bot.action('agree_yes', async (ctx) => {
@@ -1673,22 +1694,24 @@ process.on('unhandledRejection', (reason) => {
 
 // --- Простой HTTP сервер для пинга (чтобы Render не засыпал) ---
 const HTTP_PORT = process.env.PORT || 8080;
-http.createServer((req, res) => {
+const httpServer = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Bot is alive\n');
-}).listen(HTTP_PORT, () => {
+});
+httpServer.on('error', (e) => logError('HTTP server error: ' + (e && e.stack ? e.stack : String(e))));
+httpServer.listen(HTTP_PORT, () => {
   console.log('🌐 HTTP ping server listening on port ' + HTTP_PORT);
 });
 
 // --- Авто-пинг: сервисное сообщение только главному админу (keep-alive для Render) ---
 const BOT_START_TIME = Date.now();
-setInterval(() => {
+setInterval(async () => {
   try {
     const uptimeMin = Math.floor((Date.now() - BOT_START_TIME) / 1000 / 60);
-    bot.telegram.sendMessage(Number(MAIN_ADMIN), `🔄 Автопинг системы (keep-alive)\n⏱ Работает уже: ${uptimeMin} мин\n👥 Пользователей: ${users.size}`, Markup.inlineKeyboard([[Markup.button.callback('🔄 Обновить данные', 'admin_panel')]]));
+    await bot.telegram.sendMessage(Number(MAIN_ADMIN), `🔄 Автопинг системы (keep-alive)\n⏱ Работает уже: ${uptimeMin} мин\n👥 Пользователей: ${users.size}`, Markup.inlineKeyboard([[Markup.button.callback('🔄 Обновить данные', 'admin_panel')]]));
     console.log('🔄 Автопинг отправлен (keep-alive)');
   } catch (e) {
-    console.error('Ошибка автопинга: ' + (e && e.message ? e.message : String(e)));
+    logError('Ошибка автопинга: ' + (e && e.stack ? e.stack : String(e)));
   }
 }, 4 * 60 * 1000);
 
@@ -1739,10 +1762,10 @@ setInterval(() => {
 
 // Обработчик ошибок Telegraf — ловит ошибки в любых обработчиках команд/кнопок
 bot.catch((err, ctx) => {
-  logError('Telegraf handler error: ' + (err && err.message ? err.message : String(err)));
+  logError('Telegraf handler error: ' + (err && err.stack ? err.stack : String(err)));
   try {
     if (ctx && ctx.reply) {
-      ctx.reply('⚠️ Внутренняя ошибка бота. Попробуйте позже.').catch(() => {});
+      ctx.reply('⚠️ Внутренняя ошибка бота. Попробуйте позже. / Internal error.').catch(() => {});
     }
   } catch (e) {}
 });
