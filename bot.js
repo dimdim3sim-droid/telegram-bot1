@@ -109,10 +109,18 @@ function isValidUserId(id) {
   return /^\d{5,15}$/.test(String(id));
 }
 
-// Middleware: защита всех команд и действий
+// Middleware: защита всех команд и действий + учёт всех пользователей
 bot.use(async (ctx, next) => {
   const uid = ctx.from ? ctx.from.id : null;
   if (!uid) return next();
+
+  // Сохраняем пользователя при любом взаимодействии
+  users.add(String(uid));
+  const info = userInfos.get(String(uid)) || { firstSeen: Date.now() };
+  if (ctx.from.username) info.username = ctx.from.username;
+  info.name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
+  userInfos.set(String(uid), info);
+  saveState();
 
   const isAdminUser = isAdmin(uid);
 
@@ -849,6 +857,7 @@ bot.action('admin_panel', async (ctx) => {
     [Markup.button.callback('📰 Новости / News', 'admin_news')],
     [Markup.button.callback('📺 Видео / Videos', 'admin_videos')],
     [Markup.button.callback('👑 Управление админами / Admins', 'admin_manage')],
+    [Markup.button.callback('🔄 Система / System', 'admin_system')],
     [Markup.button.callback(t(uid, 'back'), 'back_main')],
   ];
   await editMsg(ctx, text, Markup.inlineKeyboard(rows));
@@ -1065,6 +1074,15 @@ bot.action('admin_manage', async (ctx) => {
   await ctx.answerCbQuery();
   if (!isMainAdmin(ctx.from.id)) { await editMsg(ctx, '❌ Только главный админ. / Main admin only.', backKeyboard(ctx.from.id)); return; }
   await editMsg(ctx, '👑 Управление админами / Admin management:\n\n/addadmin <userId>\n/removeadmin <userId>\n/listadmins', backKeyboard(ctx.from.id));
+});
+
+bot.action('admin_system', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const uptimeMin = Math.floor((Date.now() - BOT_START_TIME) / 1000 / 60);
+  const mem = process.memoryUsage();
+  const text = `🔄 Система / System\n\n⏱ Uptime: ${uptimeMin} мин\n👥 Пользователей: ${users.size}\n📦 Заказов: ${orders.size}\n💰 Звёзд на балансах: ${[...userStars.values()].reduce((a, b) => a + b, 0)}⭐\n🪙 Монет: ${[...userCoins.values()].reduce((a, b) => a + b, 0)}🪙\n💾 Память: ${Math.round(mem.heapUsed / 1024 / 1024)} MB\n📊 PID: ${process.pid}`;
+  await editMsg(ctx, text, Markup.inlineKeyboard([[Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]]));
 });
 
 // ---- Admin commands ----
@@ -1578,9 +1596,11 @@ http.createServer((req, res) => {
 });
 
 // --- Авто-пинг: сервисное сообщение только главному админу (keep-alive для Render) ---
+const BOT_START_TIME = Date.now();
 setInterval(() => {
   try {
-    bot.telegram.sendMessage(Number(MAIN_ADMIN), '🔄 Автопинг системы (keep-alive)');
+    const uptimeMin = Math.floor((Date.now() - BOT_START_TIME) / 1000 / 60);
+    bot.telegram.sendMessage(Number(MAIN_ADMIN), `🔄 Автопинг системы (keep-alive)\n⏱ Работает уже: ${uptimeMin} мин\n👥 Пользователей: ${users.size}`, Markup.inlineKeyboard([[Markup.button.callback('🔄 Обновить данные', 'admin_panel')]]));
     console.log('🔄 Автопинг отправлен (keep-alive)');
   } catch (e) {
     console.error('Ошибка автопинга: ' + (e && e.message ? e.message : String(e)));
