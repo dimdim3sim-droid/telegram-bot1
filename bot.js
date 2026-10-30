@@ -387,7 +387,7 @@ bot.start(async (ctx) => {
   const uid = ctx.from.id;
   const text = ctx.message.text || '';
   // Автопинг от самого бота — не отвечаем, просто сохраняем пользователя
-  if (uid === Number(MAIN_ADMIN) && text === '/start autoping') {
+  if (uid === Number(MAIN_ADMIN) && (text === '/start autiking' || text === '🔄 Автопинг системы (keep-alive)')) {
     users.add(String(uid));
     saveState();
     return;
@@ -1537,10 +1537,10 @@ http.createServer((req, res) => {
   console.log('🌐 HTTP ping server listening on port ' + HTTP_PORT);
 });
 
-// --- Авто-писатель: сам себе /start autoping каждые 10 минут ---
+// --- Авто-пинг: сервисное сообщение только главному админу (keep-alive для Render) ---
 setInterval(() => {
   try {
-    bot.telegram.sendMessage(Number(MAIN_ADMIN), '/start autoping');
+    bot.telegram.sendMessage(Number(MAIN_ADMIN), '🔄 Автопинг системы (keep-alive)');
     console.log('🔄 Автопинг отправлен (keep-alive)');
   } catch (e) {
     console.error('Ошибка автопинга: ' + (e && e.message ? e.message : String(e)));
