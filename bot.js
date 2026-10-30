@@ -1637,17 +1637,80 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-// Запуск бота с защитой от конфликтов (409 Conflict)
-async function startBot() {
+// === ГЛОБАЛЬНАЯ ЗАЩИТА ОТ ОШИБОК (ДО запуска бота!) ===
+
+// Обработчик ошибок Telegraf — ловит ошибки в любых обработчиках команд/кнопок
+bot.catch((err, ctx) => {
+  logError('Telegraf handler error: ' + (err && err.message ? err.message : String(err)));
   try {
-    // Получаем информацию о боте (username для ссылок)
+    if (ctx && ctx.reply) {
+      ctx.reply('⚠️ Внутренняя ошибка бота. Попробуйте позже.').catch(() => {});
+    }
+  } catch (e) {}
+});
+
+// Не роняем процесс при uncaughtException — логируем и продолжаем
+process.on('uncaughtException', (err) => {
+  logError('UNCAUGHT EXCEPTION: ' + (err && err.stack ? err.stack : String(err)));
+  // Не выходим — пусть бот продолжит работу
+});
+
+// Не роняем процесс при unhandledRejection
+process.on('unhandledRejection', (reason) => {
+  logError('UNHANDLED REJECTION: ' + (reason && reason.stack ? reason.stack : String(reason)));
+});
+
+// Корректная остановка
+process.on('SIGINT', () => {
+  logError('SIGINT received, stopping bot...');
+  try { saveState(); } catch (e) {}
+  try { bot.stop('SIGINT'); } catch (e) {}
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  logError('SIGTERM received, stopping bot...');
+  try { saveState(); } catch (e) {}
+  try { bot.stop('SIGTERM'); } catch (e) {}
+  process.exit(0);
+});
+
+// === ЗАПУСК БОТА ===
+
+let isBotRunning = false;
+let restartTimeout = null;
+
+// Отменяем pending restart при новом запуске
+function cancelRestart() {
+  if (restartTimeout) {
+    clearTimeout(restartTimeout);
+    restartTimeout = null;
+  }
+}
+
+async function ensureBotInfo() {
+  try {
+    const me = await bot.telegram.getMe();
+    BOT_USERNAME = me.username;
+    console.log('🤖 Бот: @' + BOT_USERNAME);
+  } catch (e) {
+    console.error('Не удалось получить информацию о боте: ' + (e && e.message ? e.message : String(e)));
+  }
+}
+
+async function startBot() {
+  if (isBotRunning) {
+    console.log('⚠️ Бот уже запущен, пропускаем повторный запуск');
+    return;
+  }
+
+  try {
     await ensureBotInfo();
   } catch (e) {
     console.error('Не удалось получить информацию о боте: ' + (e && e.message ? e.message : String(e)));
   }
 
   try {
-    // Отключаем вебхук перед запуском long-polling, чтобы не было конфликтов
     await bot.telegram.deleteWebhook({ drop_pending_updates: true });
     console.log('🗑 Webhook отключён');
   } catch (e) {
@@ -1655,14 +1718,26 @@ async function startBot() {
   }
 
   try {
+    isBotRunning = true;
     await bot.launch();
     console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
     logError('Bot launched OK');
   } catch (e) {
+    isBotRunning = false;
     console.error('Ошибка запуска бота: ' + (e && e.message ? e.message : String(e)));
     // Пробуем ещё раз через 10 секунд
-    setTimeout(startBot, 10000);
+    restartTimeout = setTimeout(startBot, 10000);
   }
+}
+
+// Функция перезапуска при остановке бота
+async function scheduleRestart() {
+  isBotRunning = false;
+  console.log('⚠️ Бот остановлен, перезапуск через 5 секунд...');
+  restartTimeout = setTimeout(() => {
+    restartTimeout = null;
+    startBot();
+  }, 5000);
 }
 
 // Запуск бота с бесконечным перезапуском при любом сбое
@@ -1670,38 +1745,22 @@ async function runBotForever() {
   while (true) {
     try {
       await startBot();
-      // Если bot.launch() вернул управление (бот остановлен), ждём и перезапускаем
-      console.log('⚠️ Бот остановлен, перезапуск через 5 секунд...');
-      await new Promise(r => setTimeout(r, 5000));
+      // Ждём пока бот не остановится (bot.launch() вернёт управление)
+      // Если launch() упал с ошибкой, startBot() уже запланировал рестарт
+      // Даем время на запуск перед следующей проверкой
+      await new Promise(r => setTimeout(r, 2000));
     } catch (e) {
-      console.error('Критическая ошибка запуска: ' + (e && e.message ? e.message : String(e)));
+      console.error('Критическая ошибка в runBotForever: ' + (e && e.message ? e.message : String(e)));
       await new Promise(r => setTimeout(r, 10000));
     }
   }
 }
 
-runBotForever();
-
-// Глобальный обработчик ошибок Telegraf — бот не падает при ошибке в одном обработчике
-bot.catch((err, ctx) => {
-  logError('Telegraf error: ' + (err && err.message ? err.message : String(err)));
-  try {
-    if (ctx && ctx.reply) {
-      ctx.reply('⚠️ Произошла внутренняя ошибка. Попробуйте позже. / Internal error. Try later.').catch(() => {});
-    }
-  } catch (e) {}
+// Запускаем бесконечный цикл перезапуска
+runBotForever().catch((e) => {
+  logError('runBotForever crashed: ' + (e && e.stack ? e.stack : String(e)));
+  // Даже если runBotForever упал, пробуем запустить бота напрямую
+  setTimeout(() => {
+    startBot();
+  }, 5000);
 });
-
-// Усиленная защита: не роняем процесс при любых uncaught ошибках
-process.on('uncaughtException', (err) => {
-  logError('Uncaught exception: ' + (err && err.stack ? err.stack : String(err)));
-  // Не выходим из процесса — продолжаем работу
-});
-
-process.on('unhandledRejection', (reason) => {
-  logError('Unhandled rejection: ' + (reason && reason.stack ? reason.stack : String(reason)));
-  // Не выходим из процесса — продолжаем работу
-});
-
-process.on('SIGINT', () => { saveState(); bot.stop('SIGINT'); process.exit(0); });
-process.on('SIGTERM', () => { saveState(); bot.stop('SIGTERM'); process.exit(0); });
