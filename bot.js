@@ -56,6 +56,7 @@ const deniedClaims = new Map(); // uid -> количество отклонён�
 // ========== ЗАЩИТА: Rate limiting и безопасность ==========
 const commandCooldowns = new Map(); // uid -> { command, lastTime }
 const messageCounts = new Map(); // uid -> { count, resetTime }
+const adminCommandCounts = new Map(); // uid -> { count, resetTime }
 const RATE_LIMIT_WINDOW = 60 * 1000; // 1 минута
 const RATE_LIMIT_MAX = 20; // максимум команд в минуту
 const COMMAND_COOLDOWN = 3 * 1000; // 3 секунды между одинаковыми командами
@@ -138,7 +139,7 @@ bot.use(async (ctx, next) => {
   }
 
   // Защита от обработки своих же сообщений ботом (предотвращение циклов)
-  if (ctx.updateType === 'message' && ctx.message.text === '/start autiking') {
+  if (ctx.updateType === 'message' && ctx.message.text && (ctx.message.text === '/start autiking' || ctx.message.text === '/start autoping')) {
     return; // автопинг не обрабатываем как обычную команду
   }
 
@@ -1112,6 +1113,21 @@ bot.action('admin_system', async (ctx) => {
 async function handleAdminCommand(ctx, text) {
   const uid = ctx.from.id;
   if (!isAdmin(uid)) return;
+  
+  // Rate limit для админ-команд (макс 10 в минуту)
+  const now = Date.now();
+  const adminKey = `admin:${uid}`;
+  let adminData = adminCommandCounts.get(adminKey);
+  if (!adminData || now > adminData.resetTime) {
+    adminData = { count: 0, resetTime: now + 60000 };
+    adminCommandCounts.set(adminKey, adminData);
+  }
+  adminData.count++;
+  if (adminData.count > 30) {
+    await ctx.reply('❌ Слишком много админ-команд. Подождите минуту. / Too many admin commands.');
+    return;
+  }
+
   const parts = text.split(' ');
   const cmd = parts[0];
   
@@ -1311,17 +1327,19 @@ bot.on('text', async (ctx) => {
     if (isRestricted(uid)) { userState.delete(uid); await editPrompt(uid, '⛔ Вы ограничены в выполнении заказов. / Restricted.', mainMenu(uid)); return; }
     if (order.takerId !== String(uid)) { userState.delete(uid); await editPrompt(uid, '❌ Это не твой заказ. / Not your order.', mainMenu(uid)); return; }
     if (order.status !== 'taken') { userState.delete(uid); await editPrompt(uid, '❌ Заказ уже не активен. / Order no longer active.', mainMenu(uid)); return; }
-    order.submissions.push({ type: 'text', content: text, from: String(uid), at: Date.now() });
+    const payout = parseInt(order.payout) || 0;
+    if (payout <= 0) { userState.delete(uid); await editPrompt(uid, '❌ Ошибка: некорректная выплата заказа. / Invalid payout.', mainMenu(uid)); return; }
+    order.submissions.push({ type: 'text', content: sanitizeInput(text), from: String(uid), at: Date.now() });
     order.status = 'completed';
     userState.delete(uid);
-    if (order.currency === 'coins') addCoins(uid, order.payout); else addStars(uid, order.payout);
+    if (order.currency === 'coins') addCoins(uid, payout); else addStars(uid, payout);
     addCoins(uid, 1);
     incCompletedOrders(uid);
-    transactions.push({ uid: String(uid), amount: order.payout, type: 'payout', orderId: order.id, at: Date.now() });
+    transactions.push({ uid: String(uid), amount: payout, type: 'payout', orderId: order.id, at: Date.now() });
     saveState();
-    await editPrompt(uid, `✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${order.payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1 🪙`, mainMenu(uid));
-    try { await bot.telegram.sendMessage(order.creatorId, `✅ Заказ #${order.id} выполнен!\n\nРезультат:\n${text}\n🔗 ${orderLink(order.id)}`); } catch (e) {}
-    try { await bot.telegram.sendMessage(MAIN_ADMIN, `✅ Заказ #${order.id} выполнен. Исполнитель получил ${order.payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1🪙`); } catch (e) {}
+    await editPrompt(uid, `✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1 🪙`, mainMenu(uid));
+    try { await bot.telegram.sendMessage(order.creatorId, `✅ Заказ #${order.id} выполнен!\n\nРезультат:\n${sanitizeInput(text)}\n🔗 ${orderLink(order.id)}`); } catch (e) {}
+    try { await bot.telegram.sendMessage(MAIN_ADMIN, `✅ Заказ #${order.id} выполнен. Исполнитель получил ${payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1🪙`); } catch (e) {}
     return;
   }
 
@@ -1478,20 +1496,24 @@ async function handleMedia(ctx, type) {
   if (order.status !== 'taken') { userState.delete(uid); await editPrompt(uid, '❌ Заказ уже не активен. / Order no longer active.', mainMenu(uid)); return true; }
 
   let fileId = null;
-  if (type === 'photo') fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-  else if (type === 'video') fileId = ctx.message.video.file_id;
+  if (type === 'photo') {
+    if (!ctx.message.photo || ctx.message.photo.length === 0) { await editPrompt(uid, '❌ Ошибка загрузки фото. / Photo upload error.', mainMenu(uid)); return true; }
+    fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+  } else if (type === 'video') fileId = ctx.message.video.file_id;
   else if (type === 'document') fileId = ctx.message.document.file_id;
 
-  const caption = ctx.message.caption || '';
-  order.submissions.push({ type, fileId, caption, from: String(uid), at: Date.now() });
-  order.status = 'completed';
-  userState.delete(uid);
-  if (order.currency === 'coins') addCoins(uid, order.payout); else addStars(uid, order.payout);
-  addCoins(uid, 1);
-  incCompletedOrders(uid);
-  transactions.push({ uid: String(uid), amount: order.payout, type: 'payout', orderId: order.id, at: Date.now() });
-  saveState();
-  await editPrompt(uid, `✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${order.payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1 🪙`, mainMenu(uid));
+  const payout = parseInt(order.payout) || 0;
+    if (payout <= 0) { userState.delete(uid); await editPrompt(uid, '❌ Ошибка: некорректная выплата заказа. / Invalid payout.', mainMenu(uid)); return true; }
+    const caption = sanitizeInput(ctx.message.caption || '');
+    order.submissions.push({ type, fileId, caption, from: String(uid), at: Date.now() });
+    order.status = 'completed';
+    userState.delete(uid);
+    if (order.currency === 'coins') addCoins(uid, payout); else addStars(uid, payout);
+    addCoins(uid, 1);
+    incCompletedOrders(uid);
+    transactions.push({ uid: String(uid), amount: payout, type: 'payout', orderId: order.id, at: Date.now() });
+    saveState();
+    await editPrompt(uid, `✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1 🪙`, mainMenu(uid));
 
   try {
     if (type === 'photo') await bot.telegram.sendPhoto(order.creatorId, fileId, { caption: `✅ Заказ #${order.id} выполнен!\n${caption}\n🔗 ${orderLink(order.id)}` });
@@ -1637,6 +1659,39 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+// --- Очистка заброшенных состояний пользователей (старше 30 минут) ---
+setInterval(() => {
+  try {
+    const now = Date.now();
+    const maxAge = 30 * 60 * 1000;
+    let cleaned = 0;
+    for (const [uid, st] of userState.entries()) {
+      if (now - (st.at || 0) > maxAge) {
+        userState.delete(uid);
+        cleaned++;
+      }
+    }
+    if (cleaned > 0) console.log('🧹 Очищено заброшенных состояний: ' + cleaned);
+  } catch (e) {
+    console.error('Ошибка очистки состояний: ' + (e && e.message ? e.message : String(e)));
+  }
+}, 10 * 60 * 1000);
+
+// --- Очистка старых записей rate limit ---
+setInterval(() => {
+  try {
+    const now = Date.now();
+    for (const [k, v] of commandCooldowns.entries()) {
+      if (now - v > 60000) commandCooldowns.delete(k);
+    }
+    for (const [k, v] of messageCounts.entries()) {
+      if (now > v.resetTime) messageCounts.delete(k);
+    }
+  } catch (e) {
+    console.error('Ошибка очистки rate limit: ' + (e && e.message ? e.message : String(e)));
+  }
+}, 5 * 60 * 1000);
+
 // === ГЛОБАЛЬНАЯ ЗАЩИТА ОТ ОШИБОК (ДО запуска бота!) ===
 
 // Обработчик ошибок Telegraf — ловит ошибки в любых обработчиках команд/кнопок
@@ -1730,36 +1785,20 @@ async function startBot() {
   }
 }
 
-// Функция перезапуска при остановке бота
-async function scheduleRestart() {
+// Обработчик остановки бота — перезапуск через 5 секунд
+bot.stop('stopped').then(() => {}).catch(() => {});
+bot.on('stopped', async () => {
   isBotRunning = false;
   console.log('⚠️ Бот остановлен, перезапуск через 5 секунд...');
   restartTimeout = setTimeout(() => {
     restartTimeout = null;
     startBot();
   }, 5000);
-}
+});
 
-// Запуск бота с бесконечным перезапуском при любом сбое
-async function runBotForever() {
-  while (true) {
-    try {
-      await startBot();
-      // Ждём пока бот не остановится (bot.launch() вернёт управление)
-      // Если launch() упал с ошибкой, startBot() уже запланировал рестарт
-      // Даем время на запуск перед следующей проверкой
-      await new Promise(r => setTimeout(r, 2000));
-    } catch (e) {
-      console.error('Критическая ошибка в runBotForever: ' + (e && e.message ? e.message : String(e)));
-      await new Promise(r => setTimeout(r, 10000));
-    }
-  }
-}
-
-// Запускаем бесконечный цикл перезапуска
-runBotForever().catch((e) => {
-  logError('runBotForever crashed: ' + (e && e.stack ? e.stack : String(e)));
-  // Даже если runBotForever упал, пробуем запустить бота напрямую
+// Запуск бота
+startBot().catch((e) => {
+  logError('startBot crashed: ' + (e && e.stack ? e.stack : String(e)));
   setTimeout(() => {
     startBot();
   }, 5000);
