@@ -111,6 +111,30 @@ function isValidUserId(id) {
 }
 
 // Middleware: защита всех команд и действий + учёт всех пользователей
+// saveState() вынесен в очередь — не блокируем event loop
+const saveStateQueue = [];
+let saveStateProcessing = false;
+async function flushSaveStateQueue() {
+  if (saveStateProcessing || saveStateQueue.length === 0) return;
+  saveStateProcessing = true;
+  try {
+    await saveState();
+  } catch (e) {
+    logError('flushSaveStateQueue error: ' + (e && e.stack ? e.stack : String(e)));
+  } finally {
+    saveStateProcessing = false;
+    if (saveStateQueue.length > 0) {
+      saveStateQueue.length = 0;
+      setImmediate(flushSaveStateQueue);
+    }
+  }
+}
+function scheduleSaveState() {
+  if (!saveStateQueue.length) setImmediate(flushSaveStateQueue);
+  saveStateQueue.push(1);
+}
+
+// Middleware: защита всех команд и действий + учёт всех пользователей
 bot.use(async (ctx, next) => {
   const uid = ctx.from ? ctx.from.id : null;
   if (!uid) return next();
@@ -122,7 +146,7 @@ bot.use(async (ctx, next) => {
     if (ctx.from.username) info.username = ctx.from.username;
     info.name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
     userInfos.set(String(uid), info);
-    saveState();
+    scheduleSaveState();
   } catch (e) {
     logError('Middleware user-save error: ' + (e && e.stack ? e.stack : String(e)));
   }
@@ -336,23 +360,23 @@ function saveState() {
 loadState();
 
 function getStars(uid) { return userStars.get(String(uid)) || 0; }
-function addStars(uid, n) { userStars.set(String(uid), getStars(uid) + n); saveState(); }
+function addStars(uid, n) { userStars.set(String(uid), getStars(uid) + n); scheduleSaveState(); }
 function getCoins(uid) { return userCoins.get(String(uid)) || 0; }
-function addCoins(uid, n) { userCoins.set(String(uid), getCoins(uid) + n); saveState(); }
+function addCoins(uid, n) { userCoins.set(String(uid), getCoins(uid) + n); scheduleSaveState(); }
 function isAdmin(uid) { return admins.has(String(uid)); }
 function isMainAdmin(uid) { return String(uid) === MAIN_ADMIN; }
 function isBanned(uid) { return banned.has(String(uid)); }
 function isRestricted(uid) { return restricted.has(String(uid)); }
-function genId() { const id = nextOrderId++; saveState(); return id; }
+function genId() { const id = nextOrderId++; scheduleSaveState(); return id; }
 function getFish(uid) { return userFish.get(String(uid)) || []; }
-function addFish(uid, fish) { const f = getFish(uid); f.push(fish); userFish.set(String(uid), f); saveState(); }
+function addFish(uid, fish) { const f = getFish(uid); f.push(fish); userFish.set(String(uid), f); scheduleSaveState(); }
 function getInventory(uid) { return userInventory.get(String(uid)) || []; }
-function addItem(uid, item) { const inv = getInventory(uid); inv.push(item); userInventory.set(String(uid), inv); saveState(); }
+function addItem(uid, item) { const inv = getInventory(uid); inv.push(item); userInventory.set(String(uid), inv); scheduleSaveState(); }
 function getMail(uid) { return mail.get(String(uid)) || []; }
-function addMail(uid, msg) { const m = getMail(uid); m.push(msg); mail.set(String(uid), m); saveState(); }
+function addMail(uid, msg) { const m = getMail(uid); m.push(msg); mail.set(String(uid), m); scheduleSaveState(); }
 function getProfile(uid) { if (!userProfiles.has(String(uid))) userProfiles.set(String(uid), { bio: '', avatar: '' }); return userProfiles.get(String(uid)); }
-function incCompletedOrders(uid) { userCompletedOrders.set(String(uid), (userCompletedOrders.get(String(uid)) || 0) + 1); saveState(); }
-function addInvested(uid, n) { userInvested.set(String(uid), (userInvested.get(String(uid)) || 0) + n); saveState(); }
+function incCompletedOrders(uid) { userCompletedOrders.set(String(uid), (userCompletedOrders.get(String(uid)) || 0) + 1); scheduleSaveState(); }
+function addInvested(uid, n) { userInvested.set(String(uid), (userInvested.get(String(uid)) || 0) + n); scheduleSaveState(); }
 
 let BOT_USERNAME = null;
 
@@ -1753,10 +1777,93 @@ setInterval(() => {
     for (const [k, v] of messageCounts.entries()) {
       if (now > v.resetTime) messageCounts.delete(k);
     }
+    for (const [k, v] of adminCommandCounts.entries()) {
+      if (now > v.resetTime) adminCommandCounts.delete(k);
+    }
   } catch (e) {
     console.error('Ошибка очистки rate limit: ' + (e && e.message ? e.message : String(e)));
   }
 }, 5 * 60 * 1000);
+
+// --- Очистка старых транзакций, логов и новостей (раз в час) ---
+setInterval(() => {
+  try {
+    const MAX_TRANSACTIONS = 5000;
+    const MAX_MANUAL_CREDITS = 1000;
+    const MAX_NEWS = 200;
+    const MAX_MAIL_PER_USER = 100;
+    const MAX_REFERRALS_PER_USER = 1000;
+    
+    if (transactions.length > MAX_TRANSACTIONS) {
+      transactions.splice(0, transactions.length - MAX_TRANSACTIONS);
+    }
+    if (manualCredits.length > MAX_MANUAL_CREDITS) {
+      manualCredits.splice(0, manualCredits.length - MAX_MANUAL_CREDITS);
+    }
+    if (news.length > MAX_NEWS) {
+      news.splice(0, news.length - MAX_NEWS);
+    }
+    for (const [uid, msgs] of mail.entries()) {
+      if (msgs.length > MAX_MAIL_PER_USER) {
+        mail.set(uid, msgs.slice(-MAX_MAIL_PER_USER));
+      }
+    }
+    for (const [inv, refs] of referrals.entries()) {
+      if (refs.size > MAX_REFERRALS_PER_USER) {
+        const arr = [...refs].slice(-MAX_REFERRALS_PER_USER);
+        referrals.set(inv, new Set(arr));
+      }
+    }
+    // Очистка старых заказов (оставляем последние 10000)
+    const MAX_ORDERS = 10000;
+    if (orders.size > MAX_ORDERS) {
+      const toDelete = orders.size - MAX_ORDERS;
+      let deleted = 0;
+      for (const [id] of orders.entries()) {
+        if (deleted >= toDelete) break;
+        orders.delete(id);
+        deleted++;
+      }
+    }
+    console.log('🧹 Периодическая очистка завершена');
+  } catch (e) {
+    console.error('Ошибка периодической очистки: ' + (e && e.message ? e.message : String(e)));
+  }
+}, 60 * 60 * 1000);
+
+// --- Очистка заброшенных рефералов и кэшей (раз в 6 часов) ---
+setInterval(() => {
+  try {
+    const now = Date.now();
+    const MAX_AGE = 180 * 24 * 60 * 60 * 1000; // 180 дней
+    let cleaned = 0;
+    
+    // fishingCooldown
+    for (const [uid, t] of fishingCooldown.entries()) {
+      if (now - t > MAX_AGE) { fishingCooldown.delete(uid); cleaned++; }
+    }
+    // userTasksClaimed - не чистим, это достижения
+    // userInvested - не чистим
+    // userCompletedOrders - не чистим
+    // paymentClaims - чистим старые (старше 24 часов)
+    for (const [uid, claim] of paymentClaims.entries()) {
+      if (now - claim.at > 24 * 60 * 60 * 1000) {
+        paymentClaims.delete(uid);
+        cleaned++;
+      }
+    }
+    // deniedClaims - чистим старые (старше 30 дней)
+    for (const [uid, n] of deniedClaims.entries()) {
+      if (now - (userInfos.get(uid)?.firstSeen || now) > 30 * 24 * 60 * 60 * 1000) {
+        deniedClaims.delete(uid);
+        cleaned++;
+      }
+    }
+    if (cleaned > 0) console.log('🧹 Очистка старых кэшей: ' + cleaned);
+  } catch (e) {
+    console.error('Ошибка очистки кэшей: ' + (e && e.message ? e.message : String(e)));
+  }
+}, 6 * 60 * 60 * 1000);
 
 // === ГЛОБАЛЬНАЯ ЗАЩИТА ОТ ОШИБОК (ДО запуска бота!) ===
 
@@ -1820,44 +1927,39 @@ async function ensureBotInfo() {
   }
 }
 
-// Кастомный polling loop с полной защитой от ошибок
+// Кастомный polling loop с полной защитой от ошибок (используем публичный API Telegraf)
 async function runPollingLoop() {
-  const polling = new (require('telegraf/lib/core/network/polling').Polling)(bot.telegram, []);
-  
   let consecutiveErrors = 0;
   const MAX_CONSECUTIVE_ERRORS = 50;
   
-  for await (const updates of polling) {
-    try {
+  // Используем стандартный launch но с перехватом ошибок
+  await bot.launch({
+    dropPendingUpdates: true,
+    allowedUpdates: ['message', 'callback_query', 'pre_checkout_query', 'successful_payment']
+  });
+  
+  // Если launch завершился (не должно происходить), ждём и перезапускаем
+  while (true) {
+    await new Promise(r => setTimeout(r, 5000));
+    consecutiveErrors++;
+    if (consecutiveErrors >= 50) {
+      logError('Too many consecutive restarts, waiting longer...');
+      await new Promise(r => setTimeout(r, 300000));
       consecutiveErrors = 0;
-      
-      // Обрабатываем все обновления параллельно с защитой каждого
-      await Promise.all(updates.map(async (update) => {
-        try {
-          await bot.handleUpdate(update);
-        } catch (e) {
-          logError('handleUpdate error: ' + (e && e.stack ? e.stack : String(e)));
-        }
-      }));
+    }
+    try {
+      await bot.launch({ dropPendingUpdates: true });
     } catch (e) {
-      consecutiveErrors++;
       const msg = e && e.message ? e.message : String(e);
-      logError('Polling loop error #' + consecutiveErrors + ': ' + (e && e.stack ? e.stack : String(e)));
-      
-      // Если слишком много ошибок подряд - перезапускаем polling
-      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-        logError('Too many consecutive errors, will restart polling');
-        throw e;
+      if (msg.includes('409') || msg.includes('Conflict')) {
+        logError('409 Conflict detected, waiting 30s before retry...');
+        await new Promise(r => setTimeout(r, 30000));
+      } else {
+        logError('Bot launch error: ' + (e && e.stack ? e.stack : String(e)));
+        await new Promise(r => setTimeout(r, 10000));
       }
-      
-      // Небольшая пауза перед продолжением
-      await new Promise(r => setTimeout(r, 1000 * Math.min(consecutiveErrors, 30)));
     }
   }
-  
-  // Если цикл завершился нормально (не должно происходить)
-  logError('Polling loop ended unexpectedly');
-  throw new Error('Polling loop ended');
 }
 
 let startRetries = 0;
