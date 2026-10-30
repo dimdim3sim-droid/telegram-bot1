@@ -2,7 +2,7 @@
   "name": "Бот",
   "templateId": "empty",
   "agent": {
-    "profile": "light",
+    "profile": "heavy",
     "planApproval": true,
     "askUser": true
   }
