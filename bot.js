@@ -248,14 +248,28 @@ const TASKS = [
   { id: 'invite1', ru: 'Пригласи 1 друга', en: 'Invite 1 friend', reward: 1, check: uid => (referralCount.get(String(uid)) || 0) >= 1 },
   { id: 'invite5', ru: 'Пригласи 5 друзей', en: 'Invite 5 friends', reward: 5, check: uid => (referralCount.get(String(uid)) || 0) >= 5 },
   { id: 'invite10', ru: 'Пригласи 10 друзей', en: 'Invite 10 friends', reward: 15, check: uid => (referralCount.get(String(uid)) || 0) >= 10 },
+  { id: 'invite25', ru: 'Пригласи 25 друзей', en: 'Invite 25 friends', reward: 50, check: uid => (referralCount.get(String(uid)) || 0) >= 25 },
+  { id: 'invite50', ru: 'Пригласи 50 друзей', en: 'Invite 50 friends', reward: 100, check: uid => (referralCount.get(String(uid)) || 0) >= 50 },
+  { id: 'invite100', ru: 'Пригласи 100 друзей', en: 'Invite 100 friends', reward: 250, check: uid => (referralCount.get(String(uid)) || 0) >= 100 },
   { id: 'orders3', ru: 'Выполни 3 заказа', en: 'Complete 3 orders', reward: 5, check: uid => (userCompletedOrders.get(String(uid)) || 0) >= 3 },
+  { id: 'orders10', ru: 'Выполни 10 заказов', en: 'Complete 10 orders', reward: 10, check: uid => (userCompletedOrders.get(String(uid)) || 0) >= 10 },
+  { id: 'orders50', ru: 'Выполни 50 заказов', en: 'Complete 50 orders', reward: 50, check: uid => (userCompletedOrders.get(String(uid)) || 0) >= 50 },
+  { id: 'orders100', ru: 'Выполни 100 заказов', en: 'Complete 100 orders', reward: 100, check: uid => (userCompletedOrders.get(String(uid)) || 0) >= 100 },
   { id: 'title1', ru: 'Купи любой титул', en: 'Buy any title', reward: 3, check: uid => (ownedTitles.get(String(uid)) || new Set()).size >= 1 },
   { id: 'invest10', ru: 'Инвестируй 10 монет в видео', en: 'Invest 10 coins in videos', reward: 2, check: uid => (userInvested.get(String(uid)) || 0) >= 10 },
+  { id: 'invest100', ru: 'Инвестируй 100 монет в видео', en: 'Invest 100 coins in videos', reward: 20, check: uid => (userInvested.get(String(uid)) || 0) >= 100 },
+  { id: 'fish1', ru: 'Поймай 1 рыбу', en: 'Catch 1 fish', reward: 1, check: uid => getFish(uid).length >= 1 },
+  { id: 'fish10', ru: 'Поймай 10 рыб', en: 'Catch 10 fish', reward: 5, check: uid => getFish(uid).length >= 10 },
+  { id: 'fish50', ru: 'Поймай 50 рыб', en: 'Catch 50 fish', reward: 25, check: uid => getFish(uid).length >= 50 },
+  { id: 'fish_golden', ru: 'Поймай "Золотую рыбку"', en: 'Catch "Golden Fish"', reward: 25, check: uid => getFish(uid).some(f => f.name === 'Золотая рыбка') },
+  { id: 'fish_leviathan', ru: 'Поймай "Левиафана"', en: 'Catch "Leviathan"', reward: 50, check: uid => getFish(uid).some(f => f.name === 'Левиафан') },
+  { id: 'share_bot', ru: 'Поделись ботом (напиши @username в чат)', en: 'Share bot (write @username in chat)', reward: 2, check: uid => false }, // Manual check
+  { id: 'rate_bot', ru: 'Оцени бота 5 звезд в Telegram', en: 'Rate bot 5 stars in Telegram', reward: 5, check: uid => false }, // Manual check
 ];
 
 const L = {
-  ru: { menu: '👋 Главное меню', balance: '💰 Баланс', stars: '⭐ Звёзды', coins: '🪙 Монеты', order: '📋 Заказать', execute: '⚡ Выполнить', shop: '🛒 Магазин', tasks: '🎯 Задания', lang: '🌐 Язык', suggest: '💡 Предложить идею', agreement: '📜 Соглашение', topup: '💳 Пополнить', admin: '👑 Админ-панель', back: '⬅️ Назад', choose: 'Выбирай действие:' },
-  en: { menu: '👋 Main Menu', balance: '💰 Balance', stars: '⭐ Stars', coins: '🪙 Coins', order: '📋 Order', execute: '⚡ Execute', shop: '🛒 Shop', tasks: '🎯 Tasks', lang: '🌐 Language', suggest: '💡 Suggest idea', agreement: '📜 Agreement', topup: '💳 Top up', admin: '👑 Admin panel', back: '⬅️ Back', choose: 'Choose an action:' },
+  ru: { menu: '👋 Главное меню', balance: '💰 Баланс', stars: '⭐ Звёзды', coins: '🪙 Монеты', order: '📋 Заказать', execute: '⚡ Выполнить', shop: '🛒 Магазин', tasks: '🎯 Задания', lang: '🌐 Язык', suggest: '💡 Предложить идею', agreement: '📜 Соглашение', topup: '💳 Пополнить', admin: '👑 Админ-панель', back: '⬅️ Назад', choose: 'Выбирай действие:', rating: '🏆 Рейтинг', gifts: '🎁 Подарки' },
+  en: { menu: '👋 Main Menu', balance: '💰 Balance', stars: '⭐ Stars', coins: '🪙 Coins', order: '📋 Order', execute: '⚡ Execute', shop: '🛒 Shop', tasks: '🎯 Tasks', lang: '🌐 Language', suggest: '💡 Suggest idea', agreement: '📜 Agreement', topup: '💳 Top up', admin: '👑 Admin panel', back: '⬅️ Back', choose: 'Choose an action:', rating: '🏆 Rating', gifts: '🎁 Gifts' },
 };
 function t(uid, key) {
   try {
@@ -273,7 +287,7 @@ const AGREEMENT = `📜 Пользовательское соглашение / 
 2. Звёзды внутри бота — игровая валюта. Пополняется за реальные Telegram Stars, отправляемые в канал платежей: https://t.me/stars_povelitel . После подтверждения администрацией баланс зачисляется в боте.
 3. Минимальная стоимость заказа за звёзды — 20 ⭐.
 4. Комиссия сервиса — от 5% и может доходить до 30%, но не более 30% от суммы операции. Размер комиссии определяется администрацией.
-5. Выплаты исполнителям (реальные звёзды) производятся администрацией вручную после выполнения заказа.
+5. Вся награда за заказ выдается ПОДАРКОМ (Telegram Gift). Реальные звезды не переводимы напрямую между пользователями — награда начисляется игровой валютой и/или выдается подарком в Telegram.
 6. Возвраты средств не производятся. Все операции с игровой валютой необратимы.
 7. Запрещены: мошенничество, спам, оскорбления, незаконный контент, обман других пользователей.
 8. Администрация вправе в любой момент забанить, ограничить или изменить баланс пользователя при нарушении правил или подозрении в обмане.
@@ -426,6 +440,7 @@ function mainMenu(uid) {
     [Markup.button.callback('💰 Аукцион', 'auction_list'), Markup.button.callback('🛒 Интернет', 'internet')],
     [Markup.button.callback('📰 Новости', 'news'), Markup.button.callback('💰 Донат', 'donate')],
     [Markup.button.callback('📧 Почта', 'mail'), Markup.button.callback('👤 Профиль', 'profile')],
+    [Markup.button.callback('🏆 Рейтинг', 'rating'), Markup.button.callback('🎁 Подарки', 'gifts')],
     [Markup.button.callback(t(uid, 'balance'), 'balance'), Markup.button.callback(t(uid, 'topup'), 'topup_help')],
     [Markup.button.callback('💳 Я оплатил в канале', 'paid_claim')],
     [Markup.button.callback(t(uid, 'suggest'), 'suggest_idea'), Markup.button.callback(t(uid, 'agreement'), 'show_agreement')],
@@ -576,6 +591,57 @@ bot.action(/^profile_view_(\d+)$/, async (ctx) => {
     [Markup.button.callback('💰 Донатить / Donate', `donate_to_${target}`)],
     [Markup.button.callback(t(uid, 'back'), 'back_main')],
   ]));
+});
+
+bot.action('rating', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
+  
+  const top = [...users].map(u => ({
+    id: u,
+    name: userInfos.get(u)?.name || userInfos.get(u)?.username || 'Unknown',
+    username: userInfos.get(u)?.username || '',
+    referrals: referralCount.get(u) || 0,
+    stars: getStars(u),
+    coins: getCoins(u),
+    completed: userCompletedOrders.get(u) || 0,
+  })).sort((a, b) => b.referrals - a.referrals).slice(0, 20);
+  
+  let text = '🏆 ТОП-20 по приглашениям / Referral Leaderboard:\n\n';
+  top.forEach((u, i) => {
+    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+    const isMe = u.id === String(uid) ? ' ← ТЫ' : '';
+    text += `${medal} ${u.name} (@${u.username || 'no_username'}) — 🤝 ${u.referrals} | ⭐ ${u.stars} | 🪙 ${u.coins} | ✅ ${u.completed}${isMe}\n`;
+  });
+  
+  const myRank = [...users].map(u => u).sort((a, b) => (referralCount.get(b) || 0) - (referralCount.get(a) || 0)).findIndex(u => u === String(uid)) + 1;
+  text += `\n📍 Твоя позиция: ${myRank > 0 ? myRank : 'не в топе'}`;
+  
+  await editMsg(ctx, text, Markup.inlineKeyboard([[Markup.button.callback(t(uid, 'back'), 'back_main')]]));
+});
+
+bot.action('gifts', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
+  if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
+  
+  let text = '🎁 Подарки за активность / Activity Gifts:\n\n';
+  text += '🏆 ТОП-1 по рефералам за месяц — 🎁 Telegram Gift + 100 ⭐\n';
+  text += '🥈 ТОП-2-3 по рефералам — 50 ⭐\n';
+  text += '🥉 ТОП-4-10 по рефералам — 20 ⭐\n\n';
+  text += '🎯 За выполнение заданий:\n';
+  text += '• 10 выполненных заказов — 10 ⭐\n';
+  text += '• 50 выполненных заказов — 50 ⭐\n';
+  text += '• 100 выполненных заказов — 100 ⭐ + титул "Легенда"\n\n';
+  text += '🎣 За рыбалку:\n';
+  text += '• Поймать "Золотую рыбку" — 25 ⭐\n';
+  text += '• Поймать "Левиафана" — 50 ⭐\n\n';
+  text += 'Награды выдаются автоматически при достижении целей! / Rewards auto-granted on achievement.';
+  
+  await editMsg(ctx, text, Markup.inlineKeyboard([[Markup.button.callback(t(uid, 'back'), 'back_main')]]));
 });
 
 function tasksText(uid) {
@@ -956,6 +1022,10 @@ bot.action('admin_panel', async (ctx) => {
     [Markup.button.callback('📰 Новости / News', 'admin_news')],
     [Markup.button.callback('📺 Видео / Videos', 'admin_videos')],
     [Markup.button.callback('👑 Управление админами / Admins', 'admin_manage')],
+    [Markup.button.callback('🏆 Рейтинг / Leaderboard', 'admin_rating')],
+    [Markup.button.callback('🎯 Задания / Tasks', 'admin_tasks')],
+    [Markup.button.callback('🎁 Подарки / Gifts', 'admin_gifts')],
+    [Markup.button.callback('📊 Статистика / Stats', 'admin_stats')],
     [Markup.button.callback('🔄 Система / System', 'admin_system')],
     [Markup.button.callback(t(uid, 'back'), 'back_main')],
   ];
@@ -1121,12 +1191,39 @@ bot.command('cred', async (ctx) => {
 bot.action('admin_news', async (ctx) => {
   await ctx.answerCbQuery();
   if (!isAdmin(ctx.from.id)) return;
-  if (news.length === 0) { await editMsg(ctx, '📰 Новостей нет. / No news.', backKeyboard(ctx.from.id)); return; }
-  const buttons = news.slice(-20).reverse().map((n, i) => [Markup.button.callback(`🗑️ ${n.text.slice(0, 30)}`, `del_news_${i}`)]);
+  const buttons = [
+    [Markup.button.callback('➕ Создать новость / Create News', 'admin_news_create')],
+    [Markup.button.callback('📢 Рассылка новости / Broadcast News', 'admin_news_broadcast')],
+  ];
+  if (news.length > 0) {
+    news.slice(-20).reverse().forEach((n, i) => {
+      buttons.push([Markup.button.callback(`🗑️ ${n.text.slice(0, 40)}`, `del_news_${i}`)]);
+    });
+  }
   buttons.push([Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]);
   let text = '📰 Новости / News:\n\n';
-  news.slice(-20).reverse().forEach((n, i) => { text += `${i + 1}. ${n.text}\n`; });
+  if (news.length === 0) {
+    text += 'Новостей пока нет. / No news yet.';
+  } else {
+    news.slice(-20).reverse().forEach((n, i) => { text += `${i + 1}. ${n.text}\n`; });
+  }
   await editMsg(ctx, text, Markup.inlineKeyboard(buttons));
+});
+
+bot.action('admin_news_create', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const uid = ctx.from.id;
+  userState.set(uid, { mode: 'news_create', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  await editMsg(ctx, '📝 Введи текст новости (макс. 2000 символов):\n\n/Enter news text (max 2000 chars):', backKeyboard(uid));
+});
+
+bot.action('admin_news_broadcast', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const uid = ctx.from.id;
+  userState.set(uid, { mode: 'news_broadcast', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  await editMsg(ctx, '📢 Введи текст для рассылки ВСЕМ пользователям (макс. 2000 символов):\n\n/Enter text to broadcast to ALL users (max 2000 chars):', backKeyboard(uid));
 });
 
 bot.action(/^del_news_(\d+)$/, async (ctx) => {
@@ -1185,6 +1282,81 @@ bot.action('admin_system', async (ctx) => {
   const uptimeMin = Math.floor((Date.now() - BOT_START_TIME) / 1000 / 60);
   const mem = process.memoryUsage();
   const text = `🔄 Система / System\n\n⏱ Uptime: ${uptimeMin} мин\n👥 Пользователей: ${users.size}\n📦 Заказов: ${orders.size}\n💰 Звёзд на балансах: ${[...userStars.values()].reduce((a, b) => a + b, 0)}⭐\n🪙 Монет: ${[...userCoins.values()].reduce((a, b) => a + b, 0)}🪙\n💾 Память: ${Math.round(mem.heapUsed / 1024 / 1024)} MB\n📊 PID: ${process.pid}`;
+  await editMsg(ctx, text, Markup.inlineKeyboard([[Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]]));
+});
+
+bot.action('admin_rating', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const top = [...users].map(u => ({
+    id: u,
+    name: userInfos.get(u)?.name || userInfos.get(u)?.username || 'Unknown',
+    username: userInfos.get(u)?.username || '',
+    referrals: referralCount.get(u) || 0,
+    stars: getStars(u),
+    coins: getCoins(u),
+    completed: userCompletedOrders.get(u) || 0,
+  })).sort((a, b) => b.referrals - a.referrals).slice(0, 20);
+  
+  let text = '🏆 ТОП-20 по приглашениям / Referral Leaderboard:\n\n';
+  top.forEach((u, i) => {
+    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+    text += `${medal} ${u.name} (@${u.username || 'no_username'}) — 🤝 ${u.referrals} | ⭐ ${u.stars} | 🪙 ${u.coins} | ✅ ${u.completed}\n`;
+  });
+  await editMsg(ctx, text, Markup.inlineKeyboard([[Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]]));
+});
+
+bot.action('admin_tasks', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  let text = '🎯 Управление заданиями / Tasks Management:\n\n';
+  text += 'Текущие задания:\n';
+  TASKS.forEach(t => {
+    text += `• ${t.ru} / ${t.en} — 🪙 ${t.reward}\n`;
+  });
+  text += '\nКоманды:\n/addtask <id> <ru> <en> <reward> <type> <target>\n/deltask <id>';
+  await editMsg(ctx, text, Markup.inlineKeyboard([[Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]]));
+});
+
+bot.action('admin_gifts', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  let text = '🎁 Управление подарками / Gifts Management:\n\n';
+  text += 'Здесь можно настроить подарки за выполнение заказов, рефералов и т.д.\n';
+  text += 'Функция в разработке. / Feature in development.';
+  await editMsg(ctx, text, Markup.inlineKeyboard([[Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]]));
+});
+
+bot.action('admin_stats', async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx.from.id)) return;
+  const totalUsers = users.size;
+  const activeToday = [...users].filter(u => {
+    const info = userInfos.get(u);
+    return info && (Date.now() - (info.lastActive || info.firstSeen || 0)) < 86400000;
+  }).length;
+  const totalOrders = orders.size;
+  const completedOrders = [...orders.values()].filter(o => o.status === 'completed').length;
+  const totalStars = [...userStars.values()].reduce((a, b) => a + b, 0);
+  const totalCoins = [...userCoins.values()].reduce((a, b) => a + b, 0);
+  const totalReferrals = [...referralCount.values()].reduce((a, b) => a + b, 0);
+  const bannedCount = banned.size;
+  const restrictedCount = restricted.size;
+  
+  const text = `📊 Подробная статистика / Detailed Stats:\n\n` +
+    `👥 Пользователи: ${totalUsers}\n` +
+    `🟢 Активны за 24ч: ${activeToday}\n` +
+    `🚫 Забанены: ${bannedCount}\n` +
+    `⛔ Ограничены: ${restrictedCount}\n\n` +
+    `📦 Заказы: ${totalOrders}\n` +
+    `✅ Выполнено: ${completedOrders}\n` +
+    `📈 Конверсия: ${totalOrders > 0 ? Math.round(completedOrders / totalOrders * 100) : 0}%\n\n` +
+    `⭐ Звёзд на балансах: ${totalStars}\n` +
+    `🪙 Монет: ${totalCoins}\n` +
+    `🤝 Всего приглашений: ${totalReferrals}\n\n` +
+    `📺 Видео: ${videos.size}\n` +
+    `🎣 Рыб поймано: ${[...userFish.values()].reduce((a, b) => a + b.length, 0)}\n` +
+    `📰 Новостей: ${news.length}`;
   await editMsg(ctx, text, Markup.inlineKeyboard([[Markup.button.callback(t(ctx.from.id, 'back'), 'admin_panel')]]));
 });
 
@@ -1484,6 +1656,36 @@ bot.on('text', async (ctx) => {
     saveState();
     userState.delete(uid);
     await editPrompt(uid, `✅ Инвестировано ${n} 🪙 в "${video.title}"! / Invested ${n} coins!`, mainMenu(uid));
+    return;
+  }
+
+  if (state && state.mode === 'news_create') {
+    if (text.length > 2000) { await editPrompt(uid, '❌ Текст слишком длинный. Максимум 2000 символов. / Text too long. Max 2000 chars.', backKeyboard(uid)); return; }
+    const sanitized = sanitizeInput(text);
+    news.push({ text: sanitized, at: Date.now() });
+    saveState();
+    userState.delete(uid);
+    await editPrompt(uid, `✅ Новость создана и опубликована! / News created and published!\n\n${sanitized}`, mainMenu(uid));
+    // Broadcast to all users
+    for (const u of users) {
+      if (isBanned(u) || isRestricted(u)) continue;
+      try { await bot.telegram.sendMessage(u, `📰 Новая новость / New news:\n\n${sanitized}`); } catch (e) {}
+    }
+    return;
+  }
+
+  if (state && state.mode === 'news_broadcast') {
+    if (text.length > 2000) { await editPrompt(uid, '❌ Текст слишком длинный. Максимум 2000 символов. / Text too long. Max 2000 chars.', backKeyboard(uid)); return; }
+    const sanitized = sanitizeInput(text);
+    userState.delete(uid);
+    await editPrompt(uid, `✅ Рассылка запущена! / Broadcast started!\n\n${sanitized}`, mainMenu(uid));
+    // Broadcast to all users
+    let sent = 0;
+    for (const u of users) {
+      if (isBanned(u) || isRestricted(u)) continue;
+      try { await bot.telegram.sendMessage(u, `📢 Объявление / Announcement:\n\n${sanitized}`); sent++; } catch (e) {}
+    }
+    try { await bot.telegram.sendMessage(uid, `✅ Рассылка завершена. Доставлено: ${sent} / ${users.size} пользователей.`); } catch (e) {}
     return;
   }
 
