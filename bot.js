@@ -1625,7 +1625,17 @@ setInterval(() => {
   } catch (e) {
     console.error('Ошибка автопинга: ' + (e && e.message ? e.message : String(e)));
   }
-}, 10 * 60 * 1000);
+}, 4 * 60 * 1000);
+
+// --- Сохранение состояния каждые 5 минут (чтобы не потерять данные при перезагрузке) ---
+setInterval(() => {
+  try {
+    saveState();
+    console.log('💾 Состояние сохранено');
+  } catch (e) {
+    console.error('Ошибка сохранения состояния: ' + (e && e.message ? e.message : String(e)));
+  }
+}, 5 * 60 * 1000);
 
 // Запуск бота с защитой от конфликтов (409 Conflict)
 async function startBot() {
@@ -1655,7 +1665,22 @@ async function startBot() {
   }
 }
 
-startBot();
+// Запуск бота с бесконечным перезапуском при любом сбое
+async function runBotForever() {
+  while (true) {
+    try {
+      await startBot();
+      // Если bot.launch() вернул управление (бот остановлен), ждём и перезапускаем
+      console.log('⚠️ Бот остановлен, перезапуск через 5 секунд...');
+      await new Promise(r => setTimeout(r, 5000));
+    } catch (e) {
+      console.error('Критическая ошибка запуска: ' + (e && e.message ? e.message : String(e)));
+      await new Promise(r => setTimeout(r, 10000));
+    }
+  }
+}
+
+runBotForever();
 
 // Глобальный обработчик ошибок Telegraf — бот не падает при ошибке в одном обработчике
 bot.catch((err, ctx) => {
@@ -1667,5 +1692,16 @@ bot.catch((err, ctx) => {
   } catch (e) {}
 });
 
-process.on('SIGINT', () => { saveState(); bot.stop('SIGINT'); });
-process.on('SIGTERM', () => { saveState(); bot.stop('SIGTERM'); });
+// Усиленная защита: не роняем процесс при любых uncaught ошибках
+process.on('uncaughtException', (err) => {
+  logError('Uncaught exception: ' + (err && err.stack ? err.stack : String(err)));
+  // Не выходим из процесса — продолжаем работу
+});
+
+process.on('unhandledRejection', (reason) => {
+  logError('Unhandled rejection: ' + (reason && reason.stack ? reason.stack : String(reason)));
+  // Не выходим из процесса — продолжаем работу
+});
+
+process.on('SIGINT', () => { saveState(); bot.stop('SIGINT'); process.exit(0); });
+process.on('SIGTERM', () => { saveState(); bot.stop('SIGTERM'); process.exit(0); });
