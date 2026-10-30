@@ -1819,6 +1819,7 @@ async function ensureBotInfo() {
   }
 }
 
+let startRetries = 0;
 async function startBot() {
   if (isBotRunning) {
     console.log('⚠️ Бот уже запущен, пропускаем повторный запуск');
@@ -1841,13 +1842,22 @@ async function startBot() {
   try {
     isBotRunning = true;
     await bot.launch();
+    startRetries = 0;
     console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
     logError('Bot launched OK');
   } catch (e) {
     isBotRunning = false;
-    console.error('Ошибка запуска бота: ' + (e && e.message ? e.message : String(e)));
-    // Пробуем ещё раз через 10 секунд
-    restartTimeout = setTimeout(startBot, 10000);
+    const msg = e && e.message ? e.message : String(e);
+    console.error('Ошибка запуска бота: ' + msg);
+    // 409 Conflict — другой экземпляр бота. Ждём дольше и пробуем снова
+    const delay = msg.includes('409') ? 30000 : 10000;
+    startRetries++;
+    if (startRetries > 10) {
+      console.error('❌ Слишком много попыток запуска, останавливаемся');
+      return;
+    }
+    console.log(`🔄 Повторный запуск через ${delay / 1000} сек (попытка ${startRetries})`);
+    restartTimeout = setTimeout(startBot, delay);
   }
 }
 
