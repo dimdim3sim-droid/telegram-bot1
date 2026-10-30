@@ -1796,10 +1796,11 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-// === ЗАПУСК БОТА ===
+// === ЗАПУСК БОТА С ПОЛНОЙ ЗАЩИТОЙ ОТ ВСЕХ ОШИБОК ===
 
 let isBotRunning = false;
 let restartTimeout = null;
+let pollingLoop = null;
 
 // Отменяем pending restart при новом запуске
 function cancelRestart() {
@@ -1817,6 +1818,46 @@ async function ensureBotInfo() {
   } catch (e) {
     console.error('Не удалось получить информацию о боте: ' + (e && e.message ? e.message : String(e)));
   }
+}
+
+// Кастомный polling loop с полной защитой от ошибок
+async function runPollingLoop() {
+  const polling = new (require('telegraf/lib/core/network/polling').Polling)(bot.telegram, []);
+  
+  let consecutiveErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 50;
+  
+  for await (const updates of polling) {
+    try {
+      consecutiveErrors = 0;
+      
+      // Обрабатываем все обновления параллельно с защитой каждого
+      await Promise.all(updates.map(async (update) => {
+        try {
+          await bot.handleUpdate(update);
+        } catch (e) {
+          logError('handleUpdate error: ' + (e && e.stack ? e.stack : String(e)));
+        }
+      }));
+    } catch (e) {
+      consecutiveErrors++;
+      const msg = e && e.message ? e.message : String(e);
+      logError('Polling loop error #' + consecutiveErrors + ': ' + (e && e.stack ? e.stack : String(e)));
+      
+      // Если слишком много ошибок подряд - перезапускаем polling
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        logError('Too many consecutive errors, will restart polling');
+        throw e;
+      }
+      
+      // Небольшая пауза перед продолжением
+      await new Promise(r => setTimeout(r, 1000 * Math.min(consecutiveErrors, 30)));
+    }
+  }
+  
+  // Если цикл завершился нормально (не должно происходить)
+  logError('Polling loop ended unexpectedly');
+  throw new Error('Polling loop ended');
 }
 
 let startRetries = 0;
@@ -1841,35 +1882,29 @@ async function startBot() {
 
   try {
     isBotRunning = true;
-    await bot.launch();
     startRetries = 0;
     console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
     logError('Bot launched OK');
+    
+    // Запускаем кастомный polling loop
+    await runPollingLoop();
   } catch (e) {
     isBotRunning = false;
     const msg = e && e.message ? e.message : String(e);
-    console.error('Ошибка запуска бота: ' + msg);
+    console.error('Ошибка в polling loop: ' + msg);
+    
     // 409 Conflict — другой экземпляр бота. Ждём дольше и пробуем снова
     const delay = msg.includes('409') ? 30000 : 10000;
     startRetries++;
-    if (startRetries > 10) {
-      console.error('❌ Слишком много попыток запуска, останавливаемся');
-      return;
+    if (startRetries > 20) {
+      console.error('❌ Слишком много попыток запуска, ждём 5 минут...');
+      startRetries = 0;
+      await new Promise(r => setTimeout(r, 300000));
     }
-    console.log(`🔄 Повторный запуск через ${delay / 1000} сек (попытка ${startRetries})`);
+    console.log(`🔄 Перезапуск polling через ${delay / 1000} сек (попытка ${startRetries})`);
     restartTimeout = setTimeout(startBot, delay);
   }
 }
-
-// Обработчик остановки бота — перезапуск через 5 секунд
-bot.on('stopped', async () => {
-  isBotRunning = false;
-  console.log('⚠️ Бот остановлен, перезапуск через 5 секунд...');
-  restartTimeout = setTimeout(() => {
-    restartTimeout = null;
-    startBot();
-  }, 5000);
-});
 
 // Запуск бота
 startBot().catch((e) => {
@@ -1877,4 +1912,19 @@ startBot().catch((e) => {
   setTimeout(() => {
     startBot();
   }, 5000);
+});
+
+// Дополнительная защита: если процесс получает сигнал остановки
+process.on('SIGINT', () => {
+  logError('SIGINT received, stopping bot...');
+  try { saveState(); } catch (e) {}
+  try { if (pollingLoop) pollingLoop.stop(); } catch (e) {}
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  logError('SIGTERM received, stopping bot...');
+  try { saveState(); } catch (e) {}
+  try { if (pollingLoop) pollingLoop.stop(); } catch (e) {}
+  process.exit(0);
 });
