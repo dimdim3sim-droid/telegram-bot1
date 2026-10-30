@@ -613,11 +613,25 @@ bot.action(/^view_video_(\d+)$/, async (ctx) => {
   const id = parseInt(ctx.match[1]);
   const video = videos.get(id);
   if (!video) { await editMsg(ctx, '❌ Видео не найдено. / Video not found.', mainMenu(uid)); return; }
-  await editMsg(ctx, `📺 ${video.title}\n\nАвтор: ${video.creatorName}\nИнвестиций: ${video.invested || 0} 🪙\n\n${video.description || ''}`, Markup.inlineKeyboard([
+  const kb = Markup.inlineKeyboard([
     [Markup.button.callback('💰 Инвестировать / Invest', `invest_${id}`)],
     [Markup.button.callback('👤 Профиль автора / Author profile', `profile_view_${video.creatorId}`)],
     [Markup.button.callback(t(uid, 'back'), 'back_main')],
-  ]));
+  ]);
+  const caption = `📺 ${video.title}\n\nАвтор: ${video.creatorName}\nИнвестиций: ${video.invested || 0} 🪙\n\n${video.description || ''}`.slice(0, 1024);
+  // Показываем реальный ролик, если он был загружен
+  if (video.mediaFileId) {
+    try {
+      if (video.mediaType === 'photo') await ctx.replyWithPhoto(video.mediaFileId, { caption, reply_markup: kb });
+      else if (video.mediaType === 'video') await ctx.replyWithVideo(video.mediaFileId, { caption, reply_markup: kb });
+      else await ctx.replyWithDocument(video.mediaFileId, { caption, reply_markup: kb });
+      return;
+    } catch (e) {
+      await ctx.reply(`⚠️ Не удалось загрузить ролик: ${e.message}\n\n${caption}`, kb);
+      return;
+    }
+  }
+  await editMsg(ctx, `📺 ${video.title}\n\nАвтор: ${video.creatorName}\nИнвестиций: ${video.invested || 0} 🪙\n\n${video.description || ''}\n\n⚠️ Ролька нет — только текст. / No file, text only.`, kb);
 });
 
 bot.action(/^invest_(\d+)$/, async (ctx) => {
@@ -1085,11 +1099,23 @@ bot.on('text', async (ctx) => {
     return;
   }
   if (state && state.mode === 'video_desc') {
-    const id = nextVideoId++;
-    videos.set(id, { id, title: state.title, description: text, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now() });
-    saveState();
-    userState.delete(uid);
-    await editPrompt(uid, `✅ Видео "${state.title}" создано! / Video created!`, mainMenu(uid));
+    state.description = text;
+    state.mode = 'video_upload';
+    userState.set(uid, state);
+    await editPrompt(uid, '🎬 Теперь пришли видеоролик (видео или файл) — он будет показываться зрителям.\nМожно пропустить: /skip\n\nNow send your video (or file) — viewers will see it. Skip: /skip', backKeyboard(uid));
+    return;
+  }
+
+  if (state && state.mode === 'video_upload') {
+    if (text.toLowerCase() === '/skip') {
+      const id = nextVideoId++;
+      videos.set(id, { id, title: state.title, description: state.description, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now() });
+      saveState();
+      userState.delete(uid);
+      await editPrompt(uid, `✅ Видео "${state.title}" создано (без ролика)! / Video created (no file)!`, mainMenu(uid));
+      return;
+    }
+    await editPrompt(uid, '❌ Пришли именно видео (файл), а не текст.\nИли /skip, чтобы создать без ролика.\n\nSend a video file, not text. Or /skip to create without a file.', backKeyboard(uid));
     return;
   }
 
@@ -1183,6 +1209,24 @@ bot.on('text', async (ctx) => {
 async function handleMedia(ctx, type) {
   const uid = ctx.from.id;
   const state = userState.get(uid);
+
+  // Создание видео в «Интернете» — загрузка ролика
+  if (state && state.mode === 'video_upload') {
+    if (type === 'photo') {
+      await editPrompt(uid, '❌ Пришли именно видео (не фото).\nИли /skip, чтобы создать без ролика.\n\nSend a video file (not a photo). Or /skip.', backKeyboard(uid));
+      return true;
+    }
+    let fileId = null;
+    if (type === 'video') fileId = ctx.message.video.file_id;
+    else if (type === 'document') fileId = ctx.message.document.file_id;
+    const id = nextVideoId++;
+    videos.set(id, { id, title: state.title, description: state.description, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now(), mediaType: type, mediaFileId: fileId });
+    saveState();
+    userState.delete(uid);
+    await editPrompt(uid, `✅ Видео "${state.title}" создано с роликом! / Video created with file!`, mainMenu(uid));
+    return true;
+  }
+
   if (!state || state.mode !== 'submit') return false;
   const order = orders.get(state.orderId);
   if (!order) { userState.delete(uid); await editPrompt(uid, '❌ Заказ не найден. / Order not found.', mainMenu(uid)); return true; }

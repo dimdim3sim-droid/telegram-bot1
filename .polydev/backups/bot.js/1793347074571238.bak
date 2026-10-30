@@ -116,16 +116,16 @@ function t(uid, key) { return (L[getLang(uid)] || L.ru)[key] || key; }
 
 const AGREEMENT = `📜 Пользовательское соглашение / User Agreement
 
-1. Сервис — площадка для заказов и выполнения работ за Telegram Stars.
-2. Комиссия сервиса — 5% от суммы заказа.
-3. Исполнитель обязуется выполнить заказ качественно и в срок.
-4. Оплата только реальными Telegram Stars, без возвратов после выполнения.
-5. Запрещены мошенничество, спам, оскорбления, незаконный контент.
-6. Администрация вправе забанить/ограничить пользователя при нарушении правил.
-7. Споры разрешаются администрацией добросовестно.
-8. Игровая валюта (монеты) зарабатывается за задания и выполнение заказов.
-9. Пользователь несёт ответственность за свои действия на платформе.
-10. Используя бота, вы соглашаетесь с условиями.`;
+1. Сервис — площадка для заказов и выполнения работ. Внутри бота используется игровая валюта (⭐ звёзды и 🪙 монеты).
+2. Звёзды внутри бота — игровая валюта. Пополняется за реальные Telegram Stars, отправляемые в канал платежей: https://t.me/stars_povelitel . После подтверждения администрацией баланс зачисляется в боте.
+3. Минимальная стоимость заказа за звёзды — 20 ⭐.
+4. Комиссия сервиса — от 5% и может доходить до 30%, но не более 30% от суммы операции. Размер комиссии определяется администрацией.
+5. Выплаты исполнителям (реальные звёзды) производятся администрацией вручную после выполнения заказа.
+6. Возвраты средств не производятся. Все операции с игровой валютой необратимы.
+7. Запрещены: мошенничество, спам, оскорбления, незаконный контент, обман других пользователей.
+8. Администрация вправе в любой момент забанить, ограничить или изменить баланс пользователя при нарушении правил или подозрении в обмане.
+9. Решения администрации по спорам окончательны. Администрация не несёт ответственности за действия пользователей, задержки выплат, технические сбои и утрату игровой валюты.
+10. Пользуясь ботом, ты подтверждаешь, что ознакомился с условиями и принимаешь их полностью.`;
 
 function getLang(uid) { return userLang.get(String(uid)) || 'ru'; }
 function setLang(uid, l) { userLang.set(String(uid), l); saveState(); }
@@ -327,28 +327,13 @@ bot.action('show_agreement', async (ctx) => {
 bot.action('topup_help', async (ctx) => {
   await ctx.answerCbQuery();
   const uid = ctx.from.id;
-  const text = '💳 Пополнение реальными Telegram Stars:\n\n1️⃣ Переведи звёзды по ссылке: https://t.me/stars_povelitel\n2️⃣ Затем нажми «💳 Я оплатил в канале» в меню\n3️⃣ Админ проверит и начислит баланс\n\n📌 Или выбери сумму ниже (оплата через счёт):\n\nTop up with real Telegram Stars.';
+  const text = '💳 Пополнение баланса (⭐ звёзды — игровая валюта бота)\n\n1️⃣ Переведи реальные Telegram Stars в канал платежей\n2️⃣ Вернись в бота и нажми «💳 Я оплатил в канале»\n3️⃣ Администрация проверит и начислит баланс\n\n⏱️ Зачисление после подтверждения.\n\nTop up your in-bot game stars via the payment channel.';
   const kb = Markup.inlineKeyboard([
     [Markup.button.url('⭐ Перевести звёзды', 'https://t.me/stars_povelitel')],
-    [Markup.button.callback('⭐ 10 Stars → 9 на баланс', 'topup_10'), Markup.button.callback('⭐ 50 Stars → 47 на баланс', 'topup_50')],
-    [Markup.button.callback('⭐ 100 Stars → 95 на баланс', 'topup_100'), Markup.button.callback('⭐ 500 Stars → 475 на баланс', 'topup_500')],
     [Markup.button.callback('💳 Я оплатил в канале', 'paid_claim')],
     [Markup.button.callback(t(uid, 'back'), 'back_main')],
   ]);
   await editMsg(ctx, text, kb);
-});
-bot.action(/^topup_(\d+)$/, async (ctx) => {
-  await ctx.answerCbQuery();
-  const uid = ctx.from.id;
-  const amount = parseInt(ctx.match[1]);
-  await ctx.replyWithInvoice({
-    title: 'Пополнение баланса / Top up',
-    description: `Пополнение на ${amount} Telegram Stars (комиссия 5%)`,
-    payload: `topup_${uid}_${amount}_${Date.now()}`,
-    currency: 'XTR',
-    prices: [{ label: `Telegram Stars ${amount}`, amount }],
-    provider_token: '',
-  });
 });
 bot.action('lang_switch', async (ctx) => {
   await ctx.answerCbQuery();
@@ -1057,7 +1042,7 @@ bot.on('text', async (ctx) => {
     state.description = text;
     state.mode = 'create_amount';
     userState.set(uid, state);
-    await editPrompt(uid, '⭐ Сколько звёзд/монет заплатить за заказ? (число) / How many stars/coins?', backKeyboard(uid));
+    await editPrompt(uid, '⭐ Сколько звёзд/монет заплатить за заказ? (число)\n📌 Минимум за звёзды — 20 ⭐ / How many stars/coins? (min 20 for stars)', backKeyboard(uid));
     return;
   }
 
@@ -1237,9 +1222,14 @@ bot.action('order_currency_stars', async (ctx) => {
   const uid = ctx.from.id;
   const st = userState.get(uid);
   if (!st || st.mode !== 'create_currency') { await editMsg(ctx, menuText(uid), mainMenu(uid)); return; }
+  if (st.amount < 20) {
+    userState.delete(uid);
+    await editMsg(ctx, `❌ Минимальная стоимость заказа за звёзды — 20 ⭐. Ты указал ${st.amount}.\nСоздай заново или выбери монеты.`, mainMenu(uid));
+    return;
+  }
   if (getStars(uid) < st.amount) {
     userState.delete(uid);
-    await editMsg(ctx, `❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐. Пополни реально: /pay ${st.amount - getStars(uid)}`, mainMenu(uid));
+    await editMsg(ctx, `❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐.\nПополни: переведи реальные Stars в канал https://t.me/stars_povelitel и нажми «💳 Я оплатил в канале».\nНе хватает: ${st.amount - getStars(uid)} ⭐`, mainMenu(uid));
     return;
   }
   const commission = Math.ceil(st.amount * COMMISSION);
@@ -1277,17 +1267,11 @@ bot.action('order_currency_coins', async (ctx) => {
 // ---- Real Stars payment ----
 bot.command('pay', async (ctx) => {
   const uid = ctx.from.id;
-  const parts = ctx.message.text.split(' ');
-  const amount = parseInt(parts[1]);
-  if (!amount || amount <= 0) { await ctx.reply('Использование: /pay <сумма в звёздах> / Usage: /pay <amount>'); return; }
-  await ctx.replyWithInvoice({
-    title: 'Пополнение баланса / Top up',
-    description: `Пополнение на ${amount} Telegram Stars`,
-    payload: `topup_${uid}_${amount}_${Date.now()}`,
-    currency: 'XTR',
-    prices: [{ label: 'Telegram Stars', amount }],
-    provider_token: '',
-  });
+  await ctx.reply('💳 Пополнение баланса (⭐ звёзды — игровая валюта бота)\n\n1️⃣ Переведи реальные Telegram Stars в канал платежей\n2️⃣ Вернись в бота и нажми «💳 Я оплатил в канале»\n3️⃣ Администрация проверит и начислит баланс', Markup.inlineKeyboard([
+    [Markup.button.url('⭐ Перевести звёзды', 'https://t.me/stars_povelitel')],
+    [Markup.button.callback('💳 Я оплатил в канале', 'paid_claim')],
+    [Markup.button.callback('👋 Главное меню', 'back_main')],
+  ]));
 });
 
 bot.on('pre_checkout_query', async (ctx) => {

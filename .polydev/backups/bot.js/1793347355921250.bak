@@ -1042,7 +1042,7 @@ bot.on('text', async (ctx) => {
     state.description = text;
     state.mode = 'create_amount';
     userState.set(uid, state);
-    await editPrompt(uid, '⭐ Сколько звёзд/монет заплатить за заказ? (число) / How many stars/coins?', backKeyboard(uid));
+    await editPrompt(uid, '⭐ Сколько звёзд/монет заплатить за заказ? (число)\n📌 Минимум за звёзды — 20 ⭐ / How many stars/coins? (min 20 for stars)', backKeyboard(uid));
     return;
   }
 
@@ -1085,11 +1085,23 @@ bot.on('text', async (ctx) => {
     return;
   }
   if (state && state.mode === 'video_desc') {
-    const id = nextVideoId++;
-    videos.set(id, { id, title: state.title, description: text, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now() });
-    saveState();
-    userState.delete(uid);
-    await editPrompt(uid, `✅ Видео "${state.title}" создано! / Video created!`, mainMenu(uid));
+    state.description = text;
+    state.mode = 'video_upload';
+    userState.set(uid, state);
+    await editPrompt(uid, '🎬 Теперь пришли видеоролик (видео или файл) — он будет показываться зрителям.\nМожно пропустить: /skip\n\nNow send your video (or file) — viewers will see it. Skip: /skip', backKeyboard(uid));
+    return;
+  }
+
+  if (state && state.mode === 'video_upload') {
+    if (text.toLowerCase() === '/skip') {
+      const id = nextVideoId++;
+      videos.set(id, { id, title: state.title, description: state.description, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now() });
+      saveState();
+      userState.delete(uid);
+      await editPrompt(uid, `✅ Видео "${state.title}" создано (без ролика)! / Video created (no file)!`, mainMenu(uid));
+      return;
+    }
+    await editPrompt(uid, '❌ Пришли именно видео (файл), а не текст.\nИли /skip, чтобы создать без ролика.\n\nSend a video file, not text. Or /skip to create without a file.', backKeyboard(uid));
     return;
   }
 
@@ -1183,6 +1195,21 @@ bot.on('text', async (ctx) => {
 async function handleMedia(ctx, type) {
   const uid = ctx.from.id;
   const state = userState.get(uid);
+
+  // Создание видео в «Интернете» — загрузка ролика
+  if (state && state.mode === 'video_upload') {
+    let fileId = null;
+    if (type === 'photo') fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+    else if (type === 'video') fileId = ctx.message.video.file_id;
+    else if (type === 'document') fileId = ctx.message.document.file_id;
+    const id = nextVideoId++;
+    videos.set(id, { id, title: state.title, description: state.description, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now(), mediaType: type, mediaFileId: fileId });
+    saveState();
+    userState.delete(uid);
+    await editPrompt(uid, `✅ Видео "${state.title}" создано с роликом! / Video created with file!`, mainMenu(uid));
+    return true;
+  }
+
   if (!state || state.mode !== 'submit') return false;
   const order = orders.get(state.orderId);
   if (!order) { userState.delete(uid); await editPrompt(uid, '❌ Заказ не найден. / Order not found.', mainMenu(uid)); return true; }
@@ -1222,9 +1249,14 @@ bot.action('order_currency_stars', async (ctx) => {
   const uid = ctx.from.id;
   const st = userState.get(uid);
   if (!st || st.mode !== 'create_currency') { await editMsg(ctx, menuText(uid), mainMenu(uid)); return; }
+  if (st.amount < 20) {
+    userState.delete(uid);
+    await editMsg(ctx, `❌ Минимальная стоимость заказа за звёзды — 20 ⭐. Ты указал ${st.amount}.\nСоздай заново или выбери монеты.`, mainMenu(uid));
+    return;
+  }
   if (getStars(uid) < st.amount) {
     userState.delete(uid);
-    await editMsg(ctx, `❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐. Пополни реально: /pay ${st.amount - getStars(uid)}`, mainMenu(uid));
+    await editMsg(ctx, `❌ Недостаточно звёзд. Баланс: ${getStars(uid)} ⭐.\nПополни: переведи реальные Stars в канал https://t.me/stars_povelitel и нажми «💳 Я оплатил в канале».\nНе хватает: ${st.amount - getStars(uid)} ⭐`, mainMenu(uid));
     return;
   }
   const commission = Math.ceil(st.amount * COMMISSION);
@@ -1262,17 +1294,11 @@ bot.action('order_currency_coins', async (ctx) => {
 // ---- Real Stars payment ----
 bot.command('pay', async (ctx) => {
   const uid = ctx.from.id;
-  const parts = ctx.message.text.split(' ');
-  const amount = parseInt(parts[1]);
-  if (!amount || amount <= 0) { await ctx.reply('Использование: /pay <сумма в звёздах> / Usage: /pay <amount>'); return; }
-  await ctx.replyWithInvoice({
-    title: 'Пополнение баланса / Top up',
-    description: `Пополнение на ${amount} Telegram Stars`,
-    payload: `topup_${uid}_${amount}_${Date.now()}`,
-    currency: 'XTR',
-    prices: [{ label: 'Telegram Stars', amount }],
-    provider_token: '',
-  });
+  await ctx.reply('💳 Пополнение баланса (⭐ звёзды — игровая валюта бота)\n\n1️⃣ Переведи реальные Telegram Stars в канал платежей\n2️⃣ Вернись в бота и нажми «💳 Я оплатил в канале»\n3️⃣ Администрация проверит и начислит баланс', Markup.inlineKeyboard([
+    [Markup.button.url('⭐ Перевести звёзды', 'https://t.me/stars_povelitel')],
+    [Markup.button.callback('💳 Я оплатил в канале', 'paid_claim')],
+    [Markup.button.callback('👋 Главное меню', 'back_main')],
+  ]));
 });
 
 bot.on('pre_checkout_query', async (ctx) => {
