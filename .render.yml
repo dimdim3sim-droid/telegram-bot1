@@ -1,12 +1,19 @@
 services:
-  - type: web
+  - type: worker
     name: telegram-bot
     env: node
-    buildCommand: "npm install"
+    plan: free
+    buildCommand: "npm install --no-audit --no-fund"
     startCommand: "npm start"
+    autoDeploy: true
     envVars:
       - key: BOT_TOKEN
         value: "9228974259:AAE5v1pBy4P4L7ksSqwAZOltDyY2AopATvY"
+      - key: DATA_FILE
+        value: "/data/data.json"
       - key: NODE_ENV
         value: "production"
-    autoDeploy: true
+    disks:
+      - name: data
+        mountPath: /data
+        sizeGB: 1

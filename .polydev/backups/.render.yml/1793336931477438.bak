@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: telegram-bot
+    env: node
+    buildCommand: "npm install"
+    startCommand: "npm start"
+    envVars:
+      - key: BOT_TOKEN
+        value: "9228974259:AAE5v1pBy4P4L7ksSqwAZOltDyY2AopATvY"
+      - key: NODE_ENV
+        value: "production"
+    autoDeploy: true

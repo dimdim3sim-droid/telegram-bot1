@@ -5,7 +5,7 @@ const path = require('path');
 const BOT_TOKEN = process.env.BOT_TOKEN || '9228974259:AAE5v1pBy4P4L7ksSqwAZOltDyY2AopATvY';
 const MAIN_ADMIN = '7774448780';
 const COMMISSION = 0.05;
-const DATA_FILE = path.join(__dirname, 'data.json');
+const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
 const HELPER_LINK = 'https://t.me/helperxaze';
 const FISH_COOLDOWN = 12 * 60 * 60 * 1000;
 
@@ -1142,8 +1142,31 @@ bot.on('successful_payment', async (ctx) => {
   try { await bot.telegram.sendMessage(MAIN_ADMIN, `💰 Реальное пополнение: ${ctx.from.first_name} (${uid}) +${amount}⭐`); } catch (e) {}
 });
 
+// ---- Логирование ошибок и защита от падения ----
+const LOG_FILE = path.join(__dirname, 'bot.log');
+function logError(msg) {
+  try {
+    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch (e) {}
+  console.error(msg);
+}
+
+bot.on('error', (err) => {
+  logError('Bot error: ' + (err && err.message ? err.message : String(err)));
+});
+
+process.on('unhandledRejection', (reason) => {
+  logError('Unhandled rejection: ' + (reason && reason.message ? reason.message : String(reason)));
+});
+
+process.on('uncaughtException', (err) => {
+  logError('Uncaught exception: ' + (err && err.message ? err.message : String(err)));
+  // Не роняем процесс — логируем и продолжаем
+});
+
 bot.launch();
 console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
+logError('Bot launched OK');
 
 process.on('SIGINT', () => { saveState(); bot.stop('SIGINT'); });
 process.on('SIGTERM', () => { saveState(); bot.stop('SIGTERM'); });
