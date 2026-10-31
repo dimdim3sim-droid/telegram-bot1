@@ -242,28 +242,37 @@ function isValidUserId(id) {
   return /^\d{5,15}$/.test(String(id));
 }
 
-// Middleware: защита всех команд и действий + учёт всех пользователей
-// saveState() вынесен в очередь — не блокируем event loop
-const saveStateQueue = [];
-let saveStateProcessing = false;
+// ========== Сохранение состояния БЕЗ блокировки event loop ==========
+// Раньше saveState() делал fs.writeFileSync на КАЖДОЕ действие (каждое нажатие
+// кнопки) — синхронная запись всего JSON останавливала весь бот: кнопки висели
+// по минуте, а очередь росла. Теперь: дебаунс 2 сек + асинхронная запись,
+// и только одна запись в полёте одновременно.
+let saveTimer = null;
+let saveInFlight = false;
+let saveDirty = false;
+const SAVE_DEBOUNCE_MS = 2000;
+
+function scheduleSaveState() {
+  saveDirty = true;
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    flushSaveStateQueue();
+  }, SAVE_DEBOUNCE_MS);
+}
+
 async function flushSaveStateQueue() {
-  if (saveStateProcessing || saveStateQueue.length === 0) return;
-  saveStateProcessing = true;
+  if (saveInFlight || !saveDirty) return;
+  saveInFlight = true;
+  saveDirty = false;
   try {
-    await saveState();
+    await saveStateAsync();
   } catch (e) {
     logError('flushSaveStateQueue error: ' + (e && e.stack ? e.stack : String(e)));
   } finally {
-    saveStateProcessing = false;
-    if (saveStateQueue.length > 0) {
-      saveStateQueue.length = 0;
-      setImmediate(flushSaveStateQueue);
-    }
+    saveInFlight = false;
+    if (saveDirty) scheduleSaveState();
   }
-}
-function scheduleSaveState() {
-  if (!saveStateQueue.length) setImmediate(flushSaveStateQueue);
-  saveStateQueue.push(1);
 }
 
 // Middleware: защита всех команд и действий + учёт всех пользователей
@@ -431,7 +440,7 @@ function getLang(uid) {
   const lang = userLang.get(String(uid));
   return (lang === 'ru' || lang === 'en') ? lang : 'ru';
 }
-function setLang(uid, l) { userLang.set(String(uid), l); saveState(); }
+function setLang(uid, l) { userLang.set(String(uid), l); scheduleSaveState(); }
 
 async function loadState() {
   try {
@@ -449,7 +458,7 @@ async function loadState() {
     const loaded = await loadFromGist();
     if (loaded) {
       // Сохраняем локально для быстрого доступа
-      await saveState();
+      await scheduleSaveState();
       return;
     }
     console.log('⚠️ Данные не найдены ни локально, ни в Gist. Запуск с чистого состояния.');
@@ -492,9 +501,9 @@ async function loadFromData(d) {
   deniedClaims.clear(); (d.deniedClaims || []).forEach(([uid, n]) => deniedClaims.set(uid, n));
 }
 
-function saveState() {
-  try {
-    const data = {
+// Собираем снимок состояния (общий код для sync и async версий)
+function buildStateSnapshot() {
+  return {
       nextOrderId, orders: [...orders.entries()],
       userStars: [...userStars.entries()], userCoins: [...userCoins.entries()],
       userLang: [...userLang.entries()],
@@ -518,9 +527,20 @@ function saveState() {
       manualCredits: manualCredits.slice(-500),
       userInfos: [...userInfos.entries()],
       deniedClaims: [...deniedClaims.entries()],
-    };
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data));
+  };
+}
+
+// Синхронная запись — ТОЛЬКО для аварийного завершения процесса
+function saveState() {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(buildStateSnapshot()));
   } catch (e) { console.error('State save error:', e.message); }
+}
+
+// Асинхронная запись — используется в обычной работе, не блокирует бота
+async function saveStateAsync() {
+  const json = JSON.stringify(buildStateSnapshot());
+  await fs.promises.writeFile(DATA_FILE, json);
 }
 // ========== GitHub Gist Persistent Storage ==========
 async function syncToGist() {
@@ -789,7 +809,7 @@ bot.start(async (ctx) => {
     // Автопинг от самого бота — не отвечаем, просто сохраняем пользователя
     if (uid === Number(MAIN_ADMIN) && (text === '/start autiking' || text === '🔄 Автопинг системы (keep-alive)')) {
       users.add(String(uid));
-      saveState();
+      scheduleSaveState();
       return;
     }
     users.add(String(uid));
@@ -797,7 +817,7 @@ bot.start(async (ctx) => {
     if (ctx.from.username) info.username = ctx.from.username;
     info.name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
     userInfos.set(String(uid), info);
-    saveState();
+    scheduleSaveState();
     if (isBanned(uid)) { await safeSendMessage(uid, '🚫 Вы забанены. / You are banned.'); return; }
     if (!agreed.has(String(uid))) {
       await safeSendMessage(uid, AGREEMENT, Markup.inlineKeyboard([[Markup.button.callback('✅ Принимаю / Accept', 'agree_yes'), Markup.button.callback('❌ Отказываюсь / Decline', 'agree_no')]]));
@@ -812,7 +832,7 @@ bot.start(async (ctx) => {
         referrals.get(inviter).add(String(uid));
         referralCount.set(inviter, (referralCount.get(inviter) || 0) + 1);
         addCoins(inviter, 1);
-        saveState();
+        scheduleSaveState();
         try { await safeSendMessage(inviter, `🎉 Новый приглашённый! +1 🪙\nВсего приглашено: ${referralCount.get(inviter)}`); } catch (e) {}
       }
     }
@@ -837,7 +857,7 @@ bot.start(async (ctx) => {
 bot.action('agree_yes', async (ctx) => {
   await ctx.answerCbQuery();
   agreed.add(String(ctx.from.id));
-  saveState();
+  scheduleSaveState();
   await editMsg(ctx, menuText(ctx.from.id), mainMenu(ctx.from.id));
 });
 bot.action('agree_no', async (ctx) => {
@@ -1005,7 +1025,7 @@ bot.action(/^claim_task_(.+)$/, async (ctx) => {
   claimed.add(taskId);
   userTasksClaimed.set(String(uid), claimed);
   addCoins(uid, task.reward);
-  saveState();
+  scheduleSaveState();
   await editMsg(ctx, `✅ Получено +${task.reward} 🪙 за "${getLang(uid) === 'ru' ? task.ru : task.en}"!\n\n` + tasksText(uid), tasksKeyboard(uid));
 });
 
@@ -1035,7 +1055,7 @@ bot.action(/^buy_title_(.+)$/, async (ctx) => {
   owned.add(titleId);
   ownedTitles.set(String(uid), owned);
   activeTitle.set(String(uid), title.name);
-  saveState();
+  scheduleSaveState();
   await editMsg(ctx, `✅ Куплен титул: ${title.name}! / Purchased: ${title.name}!`, mainMenu(uid));
 });
 
@@ -1071,7 +1091,7 @@ bot.action(/^take_(\d+)$/, async (ctx) => {
   order.status = 'taken';
   order.takerId = String(uid);
   setUserState(uid, { mode: 'submit', orderId, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
-  saveState();
+  scheduleSaveState();
   await editMsg(ctx, `✅ Взял заказ #${orderId}\n\n${order.description}\n\n${order.currency === 'coins' ? '🪙' : '⭐'} ${order.amount}\n🔗 ${orderLink(orderId)}\n\nОтправь результат (текст/фото/видео/файл): / Send result:`, backKeyboard(uid));
 });
 
@@ -1097,7 +1117,7 @@ bot.action('fishing', async (ctx) => {
   const fish = rollFish();
   fishingCooldown.set(String(uid), now);
   addFish(uid, fish);
-  saveState();
+  scheduleSaveState();
   await editMsg(ctx, `🎣 Ты поймал: ${fish.emoji} ${fish.name} (${fish.rarity})!\nЦенность: ${fish.value} 🪙\n\nКД: 12 часов. / Cooldown: 12h.`, Markup.inlineKeyboard([
     [Markup.button.callback('📦 Инвентарь / Inventory', 'fish_inventory')],
     [Markup.button.callback('💰 Аукцион / Auction', 'auction_list')],
@@ -1175,7 +1195,7 @@ bot.action(/^bid_(\d+)$/, async (ctx) => {
   addFish(uid, item.fish);
   item.status = 'sold';
   item.buyerId = String(uid);
-  saveState();
+  scheduleSaveState();
   await editMsg(ctx, `✅ Куплено: ${item.fish.emoji} ${item.fish.name} за ${item.price}⭐!\nПродавец получил ${item.price} 🪙`, mainMenu(uid));
   try { await bot.telegram.sendMessage(item.sellerId, `💰 Твоя рыба ${item.fish.emoji} ${item.fish.name} продана за ${item.price}⭐! Ты получил ${item.price} 🪙`); } catch (e) {}
 });
@@ -1305,7 +1325,7 @@ bot.action('mail', async (ctx) => {
     if (m.gift) { addCoins(uid, m.giftCoins || 0); if (m.giftTitle) { const owned = ownedTitles.get(String(uid)) || new Set(); owned.add(m.giftTitle); ownedTitles.set(String(uid), owned); } }
   });
   mail.set(String(uid), []);
-  saveState();
+  scheduleSaveState();
   await editMsg(ctx, text, mainMenu(uid));
 });
 
@@ -1423,7 +1443,7 @@ bot.action('paid_claim', async (ctx) => {
     return;
   }
   paymentClaims.set(String(uid), { at: Date.now() });
-  saveState();
+  scheduleSaveState();
   await editMsg(ctx, '✅ Заявка отправлена!\n\nАдминистратор проверит твои платежи в канале и начислит звёзды.\n\n📌 Как это работает:\n1. Ты платишь за сообщения в канале\n2. Жмёшь эту кнопку\n3. Админ проверяет и выдаёт звёзды\n\nClaim sent! The admin will verify your channel payments and credit your stars.', backKeyboard(uid));
   // Уведомляем всех админов
   for (const a of admins) {
@@ -1467,7 +1487,7 @@ bot.action(/^claim_credit_(\d+)$/, async (ctx) => {
   if (isBanned(target)) { await editMsg(ctx, '🚫 Этот пользователь забанен. / User is banned.', backKeyboard(ctx.from.id)); return; }
   if (isRestricted(target)) { await editMsg(ctx, '⛔ Этот пользователь ограничен. / User is restricted.', backKeyboard(ctx.from.id)); return; }
   paymentClaims.delete(target);
-  saveState();
+  scheduleSaveState();
   setUserState(ctx.from.id, { mode: 'cred_amount', target, note: 'Заявка из канала' });
   await ctx.reply(`💳 Сколько ⭐ начислить пользователю ${target}?\nВведи число (например, 70).\nОтмена: /cancel`);
 });
@@ -1479,10 +1499,10 @@ bot.action(/^claim_deny_(\d+)$/, async (ctx) => {
   paymentClaims.delete(target);
   const denied = (deniedClaims.get(target) || 0) + 1;
   deniedClaims.set(target, denied);
-  saveState();
+  scheduleSaveState();
   if (denied >= 2) {
     banned.add(target);
-    saveState();
+    scheduleSaveState();
     try { await bot.telegram.sendMessage(target, '🚫 Ты забанен за ложные заявки об оплате. / You are banned for false payment claims.'); } catch (e) {}
     try { await bot.telegram.sendMessage(MAIN_ADMIN, `🚫 Пользователь ${target} забанен за повторные ложные заявки.`); } catch (e) {}
     await editMsg(ctx, `🚫 Пользователь ${target} забанен за повторные ложные заявки. / Banned.`, Markup.inlineKeyboard([[Markup.button.callback('💳 К заявкам / To claims', 'admin_claims')]]));
@@ -1504,7 +1524,7 @@ bot.command('cred', async (ctx) => {
   addStars(target, amount);
   manualCredits.push({ uid: String(target), amount, note, at: Date.now() });
   paymentClaims.delete(String(target));
-  saveState();
+  scheduleSaveState();
   await ctx.reply(`✅ Начислено ${amount}⭐ пользователю ${target}.\n📝 ${note}`);
   try { await bot.telegram.sendMessage(target, `✅ Тебе начислено ${amount} ⭐\n📝 ${note}\n💰 Баланс: ${getStars(target)} ⭐`); } catch (e) {}
 });
@@ -1556,7 +1576,7 @@ bot.action(/^del_news_(\d+)$/, async (ctx) => {
   if (target) {
     const realIdx = news.length - 1 - idx;
     if (realIdx >= 0 && realIdx < news.length) news.splice(realIdx, 1);
-    saveState();
+    scheduleSaveState();
   }
   await editMsg(ctx, '✅ Новость удалена. / News deleted.', Markup.inlineKeyboard([[Markup.button.callback('📰 Назад / Back', 'admin_news')]]));
 });
@@ -1578,7 +1598,7 @@ bot.action(/^del_video_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const id = parseInt(ctx.match[1]);
   videos.delete(id);
-  saveState();
+  scheduleSaveState();
   await editMsg(ctx, '✅ Видео удалено. / Video deleted.', Markup.inlineKeyboard([[Markup.button.callback('📺 Назад / Back', 'admin_videos')]]));
 });
 
@@ -1587,7 +1607,7 @@ bot.action(/^del_order_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const id = parseInt(ctx.match[1]);
   orders.delete(id);
-  saveState();
+  scheduleSaveState();
   await editMsg(ctx, '✅ Заказ удалён. / Order deleted.', Markup.inlineKeyboard([[Markup.button.callback('📋 Назад / Back', 'admin_orders')]]));
 });
 
@@ -1715,34 +1735,34 @@ async function handleAdminCommand(ctx, text) {
     if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
     if (target === MAIN_ADMIN) { await ctx.reply('❌ Нельзя забанить главного админа.'); return; }
-    banned.add(target); saveState();
+    banned.add(target); scheduleSaveState();
     await ctx.reply(`🚫 Пользователь ${target} забанен. / Banned.`);
     try { await bot.telegram.sendMessage(target, '🚫 Вы забанены администратором. / You are banned.'); } catch (e) {}
   } else if (cmd === '/unban') {
     const v = validateTarget(parts[1]);
     if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
-    banned.delete(target); saveState();
+    banned.delete(target); scheduleSaveState();
     await ctx.reply(`✅ Пользователь ${target} разбанен. / Unbanned.`);
   } else if (cmd === '/restrict') {
     const v = validateTarget(parts[1]);
     if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
     if (target === MAIN_ADMIN) { await ctx.reply('❌ Нельзя ограничить главного админа.'); return; }
-    restricted.add(target); saveState();
+    restricted.add(target); scheduleSaveState();
     await ctx.reply(`⛔ Пользователь ${target} ограничен. / Restricted.`);
   } else if (cmd === '/unrestrict') {
     const v = validateTarget(parts[1]);
     if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
-    restricted.delete(target); saveState();
+    restricted.delete(target); scheduleSaveState();
     await ctx.reply(`✅ Ограничение снято с ${target}. / Unrestricted.`);
   } else if (cmd === '/addadmin') {
     if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
     const v = validateTarget(parts[1]);
     if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
-    admins.add(target); saveState();
+    admins.add(target); scheduleSaveState();
     await ctx.reply(`👑 ${target} теперь админ. / is admin now.`);
   } else if (cmd === '/removeadmin') {
     if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
@@ -1750,7 +1770,7 @@ async function handleAdminCommand(ctx, text) {
     if (!v.ok) { await ctx.reply(v.msg); return; }
     const target = parts[1];
     if (target === MAIN_ADMIN) { await ctx.reply('❌ Нельзя удалить главного админа. / Cannot remove main admin.'); return; }
-    admins.delete(target); saveState();
+    admins.delete(target); scheduleSaveState();
     await ctx.reply(`✅ ${target} больше не админ. / No longer admin.`);
   } else if (cmd === '/listadmins') {
     await ctx.reply('👑 Админы / Admins:\n' + [...admins].join('\n'));
@@ -1767,17 +1787,17 @@ async function handleAdminCommand(ctx, text) {
     const idx = parseInt(parts[1]);
     if (isNaN(idx) || idx < 1 || idx > news.length) { await ctx.reply('Использование: /delnews <номер>'); return; }
     const removed = news.splice(news.length - idx, 1);
-    saveState();
+    scheduleSaveState();
     await ctx.reply(`✅ Новость #${idx} удалена. / News deleted.`);
   } else if (cmd === '/delvideo') {
     const id = parseInt(parts[1]);
     if (!videos.has(id)) { await ctx.reply('❌ Видео не найдено. / Video not found.'); return; }
-    videos.delete(id); saveState();
+    videos.delete(id); scheduleSaveState();
     await ctx.reply(`✅ Видео #${id} удалено. / Video deleted.`);
   } else if (cmd === '/delorder') {
     const id = parseInt(parts[1]);
     if (!orders.has(id)) { await ctx.reply('❌ Заказ не найден. / Order not found.'); return; }
-    orders.delete(id); saveState();
+    orders.delete(id); scheduleSaveState();
     await ctx.reply(`✅ Заказ #${id} удалён. / Order deleted.`);
   } else if (cmd === '/addstars') {
     if (!isMainAdmin(uid)) { await ctx.reply('❌ Только главный админ. / Main admin only.'); return; }
@@ -1790,7 +1810,7 @@ async function handleAdminCommand(ctx, text) {
     if (!amount || amount <= 0) { await ctx.reply('Использование: /addstars <userId> <сумма>'); return; }
     addStars(target, amount);
     transactions.push({ uid: target, amount, type: 'manual_add', at: Date.now() });
-    saveState();
+    scheduleSaveState();
     await ctx.reply(`✅ Выдано ${amount} ⭐ пользователю ${target}. Баланс: ${getStars(target)} ⭐`);
     try { await bot.telegram.sendMessage(target, `🎁 Тебе выдано ${amount} ⭐ от администратора.`); } catch (e) {}
   } else if (cmd === '/takestars') {
@@ -1804,7 +1824,7 @@ async function handleAdminCommand(ctx, text) {
     if (!amount || amount <= 0) { await ctx.reply('Использование: /takestars <userId> <сумма>'); return; }
     if (getStars(target) < amount) { await ctx.reply('❌ Недостаточно звёзд у пользователя.'); return; }
     addStars(target, -amount);
-    saveState();
+    scheduleSaveState();
     await ctx.reply(`✅ Снято ${amount} ⭐ с пользователя ${target}. Баланс: ${getStars(target)} ⭐`);
   } else if (cmd === '/gift') {
     const target = parts[1];
@@ -1825,7 +1845,7 @@ async function handleAdminCommand(ctx, text) {
       ownedTitles.set(String(target), owned);
     }
     addMail(target, { text: `Подарок от администратора`, gift: title ? 'Титул + монеты' : 'Монеты', giftCoins: amount, giftTitle: title || null, at: Date.now() });
-    saveState();
+    scheduleSaveState();
     await ctx.reply(`🎁 Подарок отправлен ${target}: ${amount}🪙 ${title || ''}`);
   }
 }
@@ -1844,7 +1864,7 @@ bot.command('news', async (ctx) => {
   if (!text) { await ctx.reply('Использование: /news <текст>'); return; }
   if (news.length >= 100) { await ctx.reply('❌ Лимит новостей исчерпан (макс. 100). Удали старые через /delnews.'); return; }
   news.push({ title: 'Новость / News', text, at: Date.now() });
-  saveState();
+  scheduleSaveState();
   await ctx.reply('✅ Новость опубликована. / News published.');
   for (const u of users) {
     if (isBanned(u) || isRestricted(u)) continue;
@@ -1876,7 +1896,7 @@ bot.on('text', async (ctx) => {
     if (amount > 100000) { await ctx.reply('❌ Слишком большая сумма. Максимум 100 000 ⭐. / Too large amount. Max 100 000 stars.'); return; }
     addStars(target, amount);
     manualCredits.push({ uid: String(target), amount, note: state.note || 'Ручное начисление', at: Date.now() });
-    saveState();
+    scheduleSaveState();
     await ctx.reply(`✅ Начислено ${amount}⭐ пользователю ${target}.`);
     try { await bot.telegram.sendMessage(target, `✅ Тебе начислено ${amount} ⭐\n💰 Баланс: ${getStars(target)} ⭐`); } catch (e) {}
     return;
@@ -1922,7 +1942,7 @@ bot.on('text', async (ctx) => {
     addCoins(uid, 1);
     incCompletedOrders(uid);
     transactions.push({ uid: String(uid), amount: payout, type: 'payout', orderId: order.id, at: Date.now() });
-    saveState();
+    scheduleSaveState();
     await editPrompt(uid, `✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1 🪙`, mainMenu(uid));
     try { await bot.telegram.sendMessage(order.creatorId, `✅ Заказ #${order.id} выполнен!\n\nРезультат:\n${sanitizeInput(text)}\n🔗 ${orderLink(order.id)}`); } catch (e) {}
     try { await bot.telegram.sendMessage(MAIN_ADMIN, `✅ Заказ #${order.id} выполнен. Исполнитель получил ${payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1🪙`); } catch (e) {}
@@ -1950,7 +1970,7 @@ bot.on('text', async (ctx) => {
     if (text.toLowerCase() === '/skip') {
       const id = nextVideoId++;
       videos.set(id, { id, title: state.title, description: state.description, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now() });
-      saveState();
+      scheduleSaveState();
       userState.delete(uid);
       await editPrompt(uid, `✅ Видео "${state.title}" создано (без ролика)! / Video created (no file)!`, mainMenu(uid));
       return;
@@ -1979,7 +1999,7 @@ bot.on('text', async (ctx) => {
     addCoins(uid, -n);
     video.invested = (video.invested || 0) + n;
     addInvested(uid, n);
-    saveState();
+    scheduleSaveState();
     userState.delete(uid);
     await editPrompt(uid, `✅ Инвестировано ${n} 🪙 в "${video.title}"! / Invested ${n} coins!`, mainMenu(uid));
     return;
@@ -1989,7 +2009,7 @@ bot.on('text', async (ctx) => {
     if (text.length > 2000) { await editPrompt(uid, '❌ Текст слишком длинный. Максимум 2000 символов. / Text too long. Max 2000 chars.', backKeyboard(uid)); return; }
     const sanitized = sanitizeInput(text);
     news.push({ text: sanitized, at: Date.now() });
-    saveState();
+    scheduleSaveState();
     userState.delete(uid);
     await editPrompt(uid, `✅ Новость создана и опубликована! / News created and published!\n\n${sanitized}`, mainMenu(uid));
     // Broadcast to all users
@@ -2034,7 +2054,7 @@ bot.on('text', async (ctx) => {
     if (isBanned(uid)) { await editPrompt(uid, '🚫 Вы забанены. / You are banned.', mainMenu(uid)); userState.delete(uid); return; }
     addCoins(uid, -n);
     addCoins(target, n);
-    saveState();
+    scheduleSaveState();
     userState.delete(uid);
     await editPrompt(uid, `✅ Донат ${n} 🪙 отправлен пользователю ${target}! / Donated ${n} coins to ${target}!`, mainMenu(uid));
     try { await bot.telegram.sendMessage(target, `💰 Тебе донатили ${n} 🪙 от пользователя ${uid}!`); } catch (e) {}
@@ -2067,7 +2087,7 @@ bot.on('text', async (ctx) => {
     if (idx >= 0) { fishList.splice(idx, 1); userFish.set(String(uid), fishList); }
     const id = nextAuctionId++;
     auction.set(id, { id, fish, price: n, sellerId: String(uid), status: 'open', createdAt: Date.now() });
-    saveState();
+    scheduleSaveState();
     userState.delete(uid);
     await editPrompt(uid, `✅ Рыба ${fish.emoji} ${fish.name} выставлена на аукцион за ${n}⭐! / Fish listed for ${n} stars!`, mainMenu(uid));
     return;
@@ -2105,7 +2125,7 @@ async function handleMedia(ctx, type) {
     else if (type === 'document') fileId = ctx.message.document.file_id;
     const id = nextVideoId++;
     videos.set(id, { id, title: state.title, description: state.description, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', invested: 0, createdAt: Date.now(), mediaType: type, mediaFileId: fileId });
-    saveState();
+    scheduleSaveState();
     userState.delete(uid);
     await editPrompt(uid, `✅ Видео "${state.title}" создано с роликом! / Video created with file!`, mainMenu(uid));
     return true;
@@ -2136,7 +2156,7 @@ async function handleMedia(ctx, type) {
     addCoins(uid, 1);
     incCompletedOrders(uid);
     transactions.push({ uid: String(uid), amount: payout, type: 'payout', orderId: order.id, at: Date.now() });
-    saveState();
+    scheduleSaveState();
     await editPrompt(uid, `✅ Работа отправлена! Заказ #${order.id} завершён.\n💰 Получено ${payout} ${order.currency === 'coins' ? '🪙' : '⭐'} +1 🪙`, mainMenu(uid));
 
   try {
@@ -2173,7 +2193,7 @@ bot.action('order_currency_stars', async (ctx) => {
   addStars(uid, -st.amount);
   const id = genId();
   orders.set(id, { id, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', description: st.description, amount: st.amount, currency: 'stars', stars: st.amount, commission, payout, status: 'open', takerId: null, submissions: [], createdAt: Date.now(), link: orderLink(id) });
-  saveState();
+  scheduleSaveState();
   userState.delete(uid);
   await editMsg(ctx, `✅ Заказ #${id} создан!\n\n${st.description}\n⭐ ${st.amount} звёзд (комиссия 5% = ${commission}⭐)\n🔗 Ссылка: ${orderLink(id)}\n\nОпубликован. / Created.`, mainMenu(uid));
   try { await bot.telegram.sendMessage(MAIN_ADMIN, `📋 Новый заказ #${id} от ${ctx.from.first_name}: ${st.description} (${st.amount}⭐)\n🔗 ${orderLink(id)}`); } catch (e) {}
@@ -2194,7 +2214,7 @@ bot.action('order_currency_coins', async (ctx) => {
   addCoins(uid, -st.amount);
   const id = genId();
   orders.set(id, { id, creatorId: String(uid), creatorName: ctx.from.first_name || 'User', description: st.description, amount: st.amount, currency: 'coins', stars: 0, commission, payout, status: 'open', takerId: null, submissions: [], createdAt: Date.now(), link: orderLink(id) });
-  saveState();
+  scheduleSaveState();
   userState.delete(uid);
   await editMsg(ctx, `✅ Заказ #${id} создан!\n\n${st.description}\n🪙 ${st.amount} монет (комиссия 5% = ${commission}🪙)\n🔗 Ссылка: ${orderLink(id)}\n\nОпубликован. / Created.`, mainMenu(uid));
   try { await bot.telegram.sendMessage(MAIN_ADMIN, `📋 Новый заказ #${id} от ${ctx.from.first_name}: ${st.description} (${st.amount}🪙)\n🔗 ${orderLink(id)}`); } catch (e) {}
@@ -2222,7 +2242,7 @@ bot.on('successful_payment', async (ctx) => {
   const credited = amount - commission;
   addStars(uid, credited);
   transactions.push({ uid: String(uid), amount, credited, commission, type: 'topup', at: Date.now(), chargeId: payment.telegram_payment_charge_id });
-  saveState();
+  scheduleSaveState();
   await ctx.reply(`✅ Оплачено ${amount} ⭐\n💸 Комиссия сервиса (5%): ${commission} ⭐\n💰 Зачислено на баланс: ${credited} ⭐\n💰 Текущий баланс: ${getStars(uid)} ⭐`, mainMenu(uid));
   try { await bot.telegram.sendMessage(MAIN_ADMIN, `💰 Реальное пополнение: ${ctx.from.first_name} (${uid}) оплатил ${amount}⭐, зачислено ${credited}⭐ (комиссия ${commission}⭐)`); } catch (e) {}
 });
@@ -2309,7 +2329,7 @@ setInterval(() => {
 // --- Сохранение состояния каждые 5 минут (чтобы не потерять данные при перезагрузке) ---
 setInterval(() => {
   try {
-    saveState();
+    scheduleSaveState();
     console.log('💾 Состояние сохранено');
   } catch (e) {
     console.error('Ошибка сохранения состояния: ' + (e && e.message ? e.message : String(e)));
@@ -2731,7 +2751,7 @@ startBot().catch((e) => {
 function gracefulShutdown(signal) {
   logError(signal + ' received, stopping bot...');
   pollingActive = false;
-  try { saveState(); } catch (e) {}
+  try { scheduleSaveState(); } catch (e) {}
   releaseLock();
   process.exit(0);
 }
