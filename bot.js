@@ -648,8 +648,14 @@ async function editMsg(ctx, text, markup) {
       await ctx.editMessageText(text, markup || {});
       return;
     }
-  } catch (e) {}
-  await ctx.reply(text, markup || {});
+    if (ctx.message) {
+      await ctx.editMessageText(text, markup || {});
+      return;
+    }
+  } catch (e) {
+    // Не падаем в reply — логируем и выходим
+    logError('editMsg failed: ' + (e && e.stack ? e.stack : String(e)));
+  }
 }
 
 async function editPrompt(uid, text, markup) {
@@ -2338,9 +2344,13 @@ setInterval(() => {
 bot.catch((err, ctx) => {
   logError('Telegraf handler error: ' + (err && err.stack ? err.stack : String(err)));
   try {
-    if (ctx && ctx.reply) {
-      ctx.reply('⚠️ Внутренняя ошибка бота. Попробуйте позже. / Internal error.').catch(() => {});
+    if (ctx && ctx.callbackQuery && ctx.callbackQuery.message) {
+      // Для callback query пытаемся отредактировать сообщение
+      ctx.editMessageText('⚠️ Внутренняя ошибка бота. Попробуйте позже. / Internal error.').catch(() => {});
+    } else if (ctx && ctx.message) {
+      ctx.editMessageText('⚠️ Внутренняя ошибка бота. Попробуйте позже. / Internal error.').catch(() => {});
     }
+    // НЕ используем reply — он создаёт новые сообщения и спамит
   } catch (e) {}
 });
 
@@ -2446,6 +2456,10 @@ async function runPollingLoop() {
   let last409Time = 0;
   const MIN_409_INTERVAL = 30000; // Минимум 30 сек между 409
   
+  // Защита от дубликатов обновлений
+  const processedUpdates = new Set();
+  const MAX_PROCESSED_SIZE = 10000;
+  
   // Используем глобальную переменную для контроля polling
   pollingActive = true;
   let offset = 0;
@@ -2468,8 +2482,21 @@ async function runPollingLoop() {
             // Обновляем offset
             offset = updates[updates.length - 1].update_id + 1;
             
-            // Обрабатываем обновления
+            // Обрабатываем обновления с защитой от дубликатов
             for (const update of updates) {
+              // Проверка на дубликат
+              if (processedUpdates.has(update.update_id)) {
+                logError(`⚠️ Дубликат обновления пропущен: ${update.update_id}`);
+                continue;
+              }
+              processedUpdates.add(update.update_id);
+              
+              // Очистка сета если слишком большой
+              if (processedUpdates.size > MAX_PROCESSED_SIZE) {
+                const first = processedUpdates.values().next().value;
+                processedUpdates.delete(first);
+              }
+              
               try {
                 await bot.handleUpdate(update);
               } catch (e) {
