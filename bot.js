@@ -713,8 +713,17 @@ async function editMsg(ctx, text, markup) {
       return;
     }
   } catch (e) {
-    // Не падаем в reply — логируем и выходим
-    logError('editMsg failed: ' + (e && e.stack ? e.stack : String(e)));
+    const msg = (e && e.message) || String(e);
+    // "message is not modified" — нормальная ситуация (меню уже такое), молчим
+    if (msg.includes('message is not modified')) return;
+    logError('editMsg failed: ' + msg);
+    // Фоллбек: отправляем новое сообщение (с защитой от спама), чтобы пользователь не застрял
+    try {
+      const uid = ctx.from ? ctx.from.id : null;
+      if (uid && checkSpam(uid, text)) {
+        await ctx.reply(text, markup || {});
+      }
+    } catch (e2) {}
   }
 }
 
@@ -2671,8 +2680,8 @@ async function startBot() {
 
   // === СЛОЙ 3: Задержка перед стартом (даём время старому инстансу умереть при Render auto-deploy) ===
   const isRender = process.env.RENDER || process.env.RENDER_SERVICE_NAME;
-  const startupDelay = isRender ? 60000 : 30000; // 60 сек на Render, 30 сек локально
-  logError(`⏳ Ожидание ${startupDelay/1000} сек перед стартом (защита от 409 Conflict при auto-deploy)...`);
+  const startupDelay = isRender ? 15000 : 5000; // 15 сек на Render, 5 сек локально
+  logError(`⏳ Ожидание ${startupDelay/1000} сек перед стартом...`);
   await new Promise(r => setTimeout(r, startupDelay));
 
   // === СЛОЙ 4: Отключение вебхука с drop_pending_updates ===
