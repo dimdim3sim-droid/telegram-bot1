@@ -2374,7 +2374,7 @@ process.on('SIGTERM', () => {
 
 let isBotRunning = false;
 let restartTimeout = null;
-let pollingLoop = null;
+let pollingActive = false;
 
 async function acquireLock() {
   try {
@@ -2439,56 +2439,91 @@ async function ensureBotInfo() {
   }
 }
 
-// Кастомный polling loop с полной защитой от ошибок (используем публичный API Telegraf)
+// Кастомный polling loop с полной защитой от ошибок (ручное управление polling через Telegraf API)
 async function runPollingLoop() {
   let consecutiveErrors = 0;
   const MAX_CONSECUTIVE_ERRORS = 50;
   let last409Time = 0;
   const MIN_409_INTERVAL = 30000; // Минимум 30 сек между 409
   
-  // Запускаем polling с обработкой 409 Conflict
-  while (true) {
+  // Используем глобальную переменную для контроля polling
+  pollingActive = true;
+  let offset = 0;
+  
+  while (pollingActive) {
     try {
-      logError('🔄 Запуск polling...');
-      await bot.launch({
-        dropPendingUpdates: true,
-        allowedUpdates: ['message', 'callback_query', 'pre_checkout_query', 'successful_payment']
-      });
-      logError('⚠️ bot.launch() завершился неожиданно, перезапуск через 5 сек...');
-      notifyAdmin('⚠️ <b>Polling упал</b>\n\nBot.launch() завершился неожиданно. Авто-перезапуск через 5 сек.', true);
-    } catch (e) {
-      const msg = e && e.message ? e.message : String(e);
-      if (msg.includes('409') || msg.includes('Conflict')) {
-        const now = Date.now();
-        const timeSinceLast409 = now - last409Time;
-        
-        if (timeSinceLast409 < MIN_409_INTERVAL) {
-          // 409 происходит слишком часто - увеличиваем задержку
-          const extraDelay = MIN_409_INTERVAL - timeSinceLast409;
-          logError(`⚠️ 409 Conflict слишком частый (${timeSinceLast409}мс назад). Дополнительная задержка: ${extraDelay}мс`);
-          await new Promise(r => setTimeout(r, extraDelay));
+      logError('🔄 Запуск ручного polling...');
+      
+      // Используем getUpdates напрямую для полного контроля
+      while (pollingActive) {
+        try {
+          const updates = await bot.telegram.getUpdates({
+            offset: offset,
+            limit: 100,
+            timeout: 30,
+            allowed_updates: ['message', 'callback_query', 'pre_checkout_query', 'successful_payment']
+          });
+          
+          if (updates && updates.length > 0) {
+            // Обновляем offset
+            offset = updates[updates.length - 1].update_id + 1;
+            
+            // Обрабатываем обновления
+            for (const update of updates) {
+              try {
+                await bot.handleUpdate(update);
+              } catch (e) {
+                logError('⚠️ Ошибка обработки update: ' + (e && e.stack ? e.stack : String(e)));
+              }
+            }
+          }
+          
+          // Сбрасываем счетчик ошибок при успехе
+          consecutiveErrors = 0;
+          
+        } catch (e) {
+          const msg = e && e.message ? e.message : String(e);
+          
+          if (msg.includes('409') || msg.includes('Conflict') || msg.includes('terminated by other getUpdates')) {
+            const now = Date.now();
+            const timeSinceLast409 = now - last409Time;
+            
+            if (timeSinceLast409 < MIN_409_INTERVAL) {
+              const extraDelay = MIN_409_INTERVAL - timeSinceLast409;
+              logError(`⚠️ 409 Conflict слишком частый (${timeSinceLast409}мс назад). Дополнительная задержка: ${extraDelay}мс`);
+              await new Promise(r => setTimeout(r, extraDelay));
+            }
+            
+            last409Time = Date.now();
+            logError('⚠️ 409 Conflict: другой инстанс бота уже запущен. Ждём 30 сек и пробуем снова...');
+            notifyAdmin('⚠️ <b>409 Conflict</b>\n\nДругой инстанс бота уже запущен. Ждём 30 сек и пробуем снова.', true);
+            await new Promise(r => setTimeout(r, 30000));
+            
+            // Сбрасываем offset при 409
+            offset = 0;
+          } else {
+            const errMsg = '❌ Polling error: ' + (e && e.stack ? e.stack : String(e));
+            logError(errMsg);
+            notifyAdmin(errMsg, true);
+            await new Promise(r => setTimeout(r, 10000));
+          }
+          
+          consecutiveErrors++;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            logError('⚠️ Слишком много ошибок подряд (' + MAX_CONSECUTIVE_ERRORS + '), ждём 5 минут...');
+            notifyAdmin('⚠️ <b>Слишком много ошибок</b>\n\n' + MAX_CONSECUTIVE_ERRORS + ' ошибок подряд. Ждём 5 минут перед перезапуском.', true);
+            await new Promise(r => setTimeout(r, 300000));
+            consecutiveErrors = 0;
+          } else {
+            await new Promise(r => setTimeout(r, 5000));
+          }
         }
-        
-        last409Time = Date.now();
-        logError('⚠️ 409 Conflict: другой инстанс бота уже запущен. Ждём 30 сек и пробуем снова...');
-        notifyAdmin('⚠️ <b>409 Conflict</b>\n\nДругой инстанс бота уже запущен. Ждём 30 сек и пробуем снова.', true);
-        await new Promise(r => setTimeout(r, 30000));
-      } else {
-        const errMsg = '❌ Bot launch error: ' + (e && e.stack ? e.stack : String(e));
-        logError(errMsg);
-        notifyAdmin(errMsg, true);
-        await new Promise(r => setTimeout(r, 10000));
       }
-    }
-    
-    consecutiveErrors++;
-    if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-      logError('⚠️ Слишком много ошибок подряд (' + MAX_CONSECUTIVE_ERRORS + '), ждём 5 минут...');
-      notifyAdmin('⚠️ <b>Слишком много ошибок</b>\n\n' + MAX_CONSECUTIVE_ERRORS + ' ошибок подряд. Ждём 5 минут перед перезапуском.', true);
-      await new Promise(r => setTimeout(r, 300000));
-      consecutiveErrors = 0;
-    } else {
-      await new Promise(r => setTimeout(r, 5000));
+    } catch (e) {
+      const errMsg = '❌ Polling loop fatal error: ' + (e && e.stack ? e.stack : String(e));
+      logError(errMsg);
+      notifyAdmin(errMsg, true);
+      await new Promise(r => setTimeout(r, 10000));
     }
   }
 }
@@ -2604,8 +2639,8 @@ startBot().catch((e) => {
 process.on('SIGINT', () => {
   logError('SIGINT received, stopping bot...');
   notifyAdmin('🛑 <b>Бот остановлен (SIGINT)</b>\n\nПолучен сигнал прерывания. Graceful shutdown...', true);
+  pollingActive = false;
   try { saveState(); } catch (e) {}
-  try { if (pollingLoop) pollingLoop.stop(); } catch (e) {}
   releaseLock();
   process.exit(0);
 });
@@ -2613,8 +2648,8 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
   logError('SIGTERM received, stopping bot...');
   notifyAdmin('🛑 <b>Бот остановлен (SIGTERM)</b>\n\nПолучен сигнал завершения. Graceful shutdown...', true);
+  pollingActive = false;
   try { saveState(); } catch (e) {}
-  try { if (pollingLoop) pollingLoop.stop(); } catch (e) {}
   releaseLock();
   process.exit(0);
 });
