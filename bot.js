@@ -2386,32 +2386,33 @@ async function runPollingLoop() {
   let consecutiveErrors = 0;
   const MAX_CONSECUTIVE_ERRORS = 50;
   
-  // Используем стандартный launch но с перехватом ошибок
-  await bot.launch({
-    dropPendingUpdates: true,
-    allowedUpdates: ['message', 'callback_query', 'pre_checkout_query', 'successful_payment']
-  });
-  
-  // Если launch завершился (не должно происходить), ждём и перезапускаем
+  // Запускаем polling с обработкой 409 Conflict
   while (true) {
-    await new Promise(r => setTimeout(r, 5000));
-    consecutiveErrors++;
-    if (consecutiveErrors >= 50) {
-      logError('Too many consecutive restarts, waiting longer...');
-      await new Promise(r => setTimeout(r, 300000));
-      consecutiveErrors = 0;
-    }
     try {
-      await bot.launch({ dropPendingUpdates: true });
+      logError('🔄 Запуск polling...');
+      await bot.launch({
+        dropPendingUpdates: true,
+        allowedUpdates: ['message', 'callback_query', 'pre_checkout_query', 'successful_payment']
+      });
+      logError('⚠️ bot.launch() завершился неожиданно, перезапуск через 5 сек...');
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
       if (msg.includes('409') || msg.includes('Conflict')) {
-        logError('409 Conflict detected, waiting 30s before retry...');
+        logError('⚠️ 409 Conflict: другой инстанс бота уже запущен. Ждём 30 сек и пробуем снова...');
         await new Promise(r => setTimeout(r, 30000));
       } else {
-        logError('Bot launch error: ' + (e && e.stack ? e.stack : String(e)));
+        logError('❌ Bot launch error: ' + (e && e.stack ? e.stack : String(e)));
         await new Promise(r => setTimeout(r, 10000));
       }
+    }
+    
+    consecutiveErrors++;
+    if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+      logError('⚠️ Слишком много ошибок подряд (' + MAX_CONSECUTIVE_ERRORS + '), ждём 5 минут...');
+      await new Promise(r => setTimeout(r, 300000));
+      consecutiveErrors = 0;
+    } else {
+      await new Promise(r => setTimeout(r, 5000));
     }
   }
 }
@@ -2441,8 +2442,8 @@ async function startBot() {
   }
 
   // === СЛОЙ 3: Задержка перед стартом (даём время старому инстансу умереть при Render auto-deploy) ===
-  logError('⏳ Ожидание 10 сек перед стартом (защита от 409 Conflict при auto-deploy)...');
-  await new Promise(r => setTimeout(r, 10000));
+  logError('⏳ Ожидание 30 сек перед стартом (защита от 409 Conflict при auto-deploy)...');
+  await new Promise(r => setTimeout(r, 30000));
 
   // === СЛОЙ 4: Отключение вебхука с drop_pending_updates ===
   try {
