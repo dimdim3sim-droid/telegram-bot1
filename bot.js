@@ -449,10 +449,18 @@ function saveState() {
 }
 // ========== GitHub Gist Persistent Storage ==========
 async function syncToGist() {
-  if (!GIST_ID || !GITHUB_TOKEN || gistSyncProcessing) return;
+  if (!GIST_ID || !GITHUB_TOKEN) {
+    console.log('⚠️ GIST_ID или GITHUB_TOKEN не настроены - пропускаем синхронизацию с Gist');
+    return;
+  }
+  if (gistSyncProcessing) return;
   gistSyncProcessing = true;
   try {
+    console.log('☁️ Начинаем синхронизацию с GitHub Gist...');
     await doSyncToGist(GIST_ID, GIST_FILENAME);
+    console.log('✅ Синхронизация с GitHub Gist завершена успешно');
+  } catch (e) {
+    console.error('❌ Ошибка синхронизации с Gist:', e.message);
   } finally {
     gistSyncProcessing = false;
   }
@@ -461,13 +469,18 @@ async function syncToGist() {
 // === СЛОЙ 4: Второй GitHub Gist (резервный) ===
 let gist2SyncProcessing = false;
 async function syncToGist2() {
-  if (!GIST2_ID || !GITHUB_TOKEN || gist2SyncProcessing) return;
+  if (!GIST2_ID || !GITHUB_TOKEN) {
+    console.log('⚠️ GIST2_ID не настроен - пропускаем резервную синхронизацию');
+    return;
+  }
+  if (gist2SyncProcessing) return;
   gist2SyncProcessing = true;
   try {
+    console.log('☁️ Начинаем резервную синхронизацию со ВТОРЫМ GitHub Gist...');
     await doSyncToGist(GIST2_ID, GIST_FILENAME);
-    console.log('☁️ Данные синхронизированы со ВТОРЫМ GitHub Gist (резерв)');
+    console.log('✅ Резервная синхронизация со ВТОРЫМ GitHub Gist завершена успешно');
   } catch (e) {
-    console.error('Gist2 sync error:', e.message);
+    console.error('❌ Ошибка резервной синхронизации с Gist2:', e.message);
   } finally {
     gist2SyncProcessing = false;
   }
@@ -2129,10 +2142,12 @@ const ADMIN_ALERT_COOLDOWN = 60 * 1000; // 1 минута между уведо�
 async function notifyAdmin(msg, isCritical = false) {
   try {
     const now = Date.now();
+    // Критические ошибки всегда проходят, некритические - с кулдауном
     if (!isCritical && now - lastAdminAlert < ADMIN_ALERT_COOLDOWN) return;
     lastAdminAlert = now;
     const text = `⚠️ <b>Ошибка бота</b>\n\n${msg}\n\n⏰ ${new Date().toLocaleString()}`;
     await bot.telegram.sendMessage(Number(MAIN_ADMIN), text, { parse_mode: 'HTML' });
+    console.log('📱 Уведомление админа отправлено:', isCritical ? 'КРИТИЧНО' : 'обычное');
   } catch (e) {
     console.error('Failed to notify admin:', e.message);
   }
@@ -2363,29 +2378,40 @@ let pollingLoop = null;
 
 async function acquireLock() {
   try {
-    // Проверяем, не запущен ли уже бот
+    // На Render файловая система эфемерна - лок через файл не работает
+    // Используем переменную окружения для детекта Render
+    const isRender = process.env.RENDER || process.env.RENDER_SERVICE_NAME;
+    
+    if (isRender) {
+      // На Render просто ждём - лок через файл не работает на эфемерной ФС
+      console.log('🌐 Render detected - skipping file lock (ephemeral FS)');
+      return true;
+    }
+    
+    // Локально используем файловый лок
     if (fs.existsSync(LOCK_FILE)) {
       const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim());
       try {
-        process.kill(pid, 0); // Проверка существования процесса
+        process.kill(pid, 0);
         console.log(`⚠️ Другой экземпляр бота уже запущен (PID: ${pid}), ждём...`);
         return false;
       } catch (e) {
-        // Процесс не существует, удаляем старый лок
         fs.unlinkSync(LOCK_FILE);
       }
     }
-    // Создаём лок
     fs.writeFileSync(LOCK_FILE, String(process.pid));
     return true;
   } catch (e) {
     console.error('Lock error: ' + (e && e.message ? e.message : String(e)));
-    return true; // В случае ошибки лока - разрешаем запуск
+    return true;
   }
 }
 
 function releaseLock() {
   try {
+    const isRender = process.env.RENDER || process.env.RENDER_SERVICE_NAME;
+    if (isRender) return; // На Render не используем файловый лок
+    
     if (fs.existsSync(LOCK_FILE)) {
       const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim());
       if (pid === process.pid) {
@@ -2417,6 +2443,8 @@ async function ensureBotInfo() {
 async function runPollingLoop() {
   let consecutiveErrors = 0;
   const MAX_CONSECUTIVE_ERRORS = 50;
+  let last409Time = 0;
+  const MIN_409_INTERVAL = 30000; // Минимум 30 сек между 409
   
   // Запускаем polling с обработкой 409 Conflict
   while (true) {
@@ -2431,6 +2459,17 @@ async function runPollingLoop() {
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
       if (msg.includes('409') || msg.includes('Conflict')) {
+        const now = Date.now();
+        const timeSinceLast409 = now - last409Time;
+        
+        if (timeSinceLast409 < MIN_409_INTERVAL) {
+          // 409 происходит слишком часто - увеличиваем задержку
+          const extraDelay = MIN_409_INTERVAL - timeSinceLast409;
+          logError(`⚠️ 409 Conflict слишком частый (${timeSinceLast409}мс назад). Дополнительная задержка: ${extraDelay}мс`);
+          await new Promise(r => setTimeout(r, extraDelay));
+        }
+        
+        last409Time = Date.now();
         logError('⚠️ 409 Conflict: другой инстанс бота уже запущен. Ждём 30 сек и пробуем снова...');
         notifyAdmin('⚠️ <b>409 Conflict</b>\n\nДругой инстанс бота уже запущен. Ждём 30 сек и пробуем снова.', true);
         await new Promise(r => setTimeout(r, 30000));
@@ -2480,8 +2519,10 @@ async function startBot() {
   }
 
   // === СЛОЙ 3: Задержка перед стартом (даём время старому инстансу умереть при Render auto-deploy) ===
-  logError('⏳ Ожидание 30 сек перед стартом (защита от 409 Conflict при auto-deploy)...');
-  await new Promise(r => setTimeout(r, 30000));
+  const isRender = process.env.RENDER || process.env.RENDER_SERVICE_NAME;
+  const startupDelay = isRender ? 60000 : 30000; // 60 сек на Render, 30 сек локально
+  logError(`⏳ Ожидание ${startupDelay/1000} сек перед стартом (защита от 409 Conflict при auto-deploy)...`);
+  await new Promise(r => setTimeout(r, startupDelay));
 
   // === СЛОЙ 4: Отключение вебхука с drop_pending_updates ===
   try {
@@ -2498,7 +2539,16 @@ async function startBot() {
     logError('⚠️ Не удалось получить информацию о боте: ' + (e && e.stack ? e.stack : String(e)));
   }
 
-  // === СЛОЙ 5.5: Вторая проверка вебхука после ensureBotInfo ===
+  // === СЛОЙ 5.5: Проверка конфигурации Gist для персистентности данных ===
+  if (!GIST_ID || !GITHUB_TOKEN) {
+    const warnMsg = '⚠️ <b>GIST_ID или GITHUB_TOKEN не настроены!</b>\n\nДанные НЕ будут сохраняться при перезапуске/деплое.\nНастройте GIST_ID и GITHUB_TOKEN в Environment Variables на Render.';
+    logError('⚠️ GIST_ID или GITHUB_TOKEN не настроены - данные НЕ будут сохраняться при перезапуске!');
+    notifyAdmin(warnMsg, true);
+  } else {
+    logError('✅ GitHub Gist настроен - данные будут сохраняться при перезапуске');
+  }
+
+  // === СЛОЙ 5.6: Вторая проверка вебхука после ensureBotInfo ===
   try {
     await bot.telegram.deleteWebhook({ drop_pending_updates: true });
     logError('🗑 Вторичная очистка вебхука выполнена');
