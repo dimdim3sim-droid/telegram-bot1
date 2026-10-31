@@ -1,0 +1,23 @@
+services:
+  - type: worker
+    name: telegram-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install --no-audit --no-fund
+    startCommand: node bot.js
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        value: "ТВОЙ_BOT_TOKEN_ЗДЕСЬ"
+      - key: GIST_ID
+        value: "ТВОЙ_GIST_ID_ЗДЕСЬ"
+      - key: GITHUB_TOKEN
+        value: "ТВОЙ_GITHUB_TOKEN_ЗДЕСЬ"
+      - key: NODE_ENV
+        value: production
+      - key: MAIN_ADMIN
+        value: "7774448780"
+    healthCheckPath: /
+    numInstances: 1
+
+version: "1"
