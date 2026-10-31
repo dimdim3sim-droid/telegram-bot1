@@ -13,6 +13,14 @@ const MAIN_ADMIN = '7774448780';
 const COMMISSION = 0.05;
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
 const DATA_BACKUP_FILE = path.join(__dirname, 'data.backup.json');
+
+// GitHub Gist persistent storage (бесплатно, данные не пропадут при деплое)
+const GIST_ID = process.env.GIST_ID; // ID гиста (создай на gist.github.com)
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN; // Personal Access Token с правами gist
+const GIST_FILENAME = 'bot-data.json';
+const GIST_API_URL = `https://api.github.com/gists/${GIST_ID}`;
+const GIST_SYNC_INTERVAL = 5 * 60 * 1000; // Синхронизация каждые 5 мин
+let gistSyncProcessing = false;
 const HELPER_LINK = 'https://t.me/helperxaze';
 const FISH_COOLDOWN = 12 * 60 * 60 * 1000;
 
@@ -313,44 +321,63 @@ function getLang(uid) {
 }
 function setLang(uid, l) { userLang.set(String(uid), l); saveState(); }
 
-function loadState() {
+async function loadState() {
   try {
-    if (!fs.existsSync(DATA_FILE)) return;
-    const d = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    nextOrderId = d.nextOrderId || 1;
-    orders.clear(); (d.orders || []).forEach(([id, o]) => orders.set(id, o));
-    userStars.clear(); (d.userStars || []).forEach(([uid, n]) => userStars.set(uid, n));
-    userCoins.clear(); (d.userCoins || []).forEach(([uid, n]) => userCoins.set(uid, n));
-    userLang.clear(); (d.userLang || []).forEach(([uid, l]) => userLang.set(uid, l));
-    ownedTitles.clear(); (d.ownedTitles || []).forEach(([uid, arr]) => ownedTitles.set(uid, new Set(arr)));
-    activeTitle.clear(); (d.activeTitle || []).forEach(([uid, t]) => activeTitle.set(uid, t));
-    agreed.clear(); (d.agreed || []).forEach(x => agreed.add(String(x)));
-    banned.clear(); (d.banned || []).forEach(x => banned.add(String(x)));
-    restricted.clear(); (d.restricted || []).forEach(x => restricted.add(String(x)));
-    admins.clear(); (d.admins || [MAIN_ADMIN]).forEach(x => admins.add(String(x)));
-    users.clear(); (d.users || []).forEach(x => users.add(String(x)));
-    transactions.length = 0; (d.transactions || []).forEach(t => transactions.push(t));
-    referrals.clear(); (d.referrals || []).forEach(([inv, arr]) => referrals.set(inv, new Set(arr)));
-    invitedBy.clear(); (d.invitedBy || []).forEach(([u, inv]) => invitedBy.set(u, inv));
-    referralCount.clear(); (d.referralCount || []).forEach(([inv, n]) => referralCount.set(inv, n));
-    userFish.clear(); (d.userFish || []).forEach(([uid, arr]) => userFish.set(uid, arr));
-    userInventory.clear(); (d.userInventory || []).forEach(([uid, arr]) => userInventory.set(uid, arr));
-    mail.clear(); (d.mail || []).forEach(([uid, arr]) => mail.set(uid, arr));
-    news.length = 0; (d.news || []).forEach(n => news.push(n));
-    videos.clear(); (d.videos || []).forEach(([id, v]) => videos.set(id, v));
-    nextVideoId = d.nextVideoId || 1;
-    auction.clear(); (d.auction || []).forEach(([id, a]) => auction.set(id, a));
-    nextAuctionId = d.nextAuctionId || 1;
-    userProfiles.clear(); (d.userProfiles || []).forEach(([uid, p]) => userProfiles.set(uid, p));
-    fishingCooldown.clear(); (d.fishingCooldown || []).forEach(([uid, t]) => fishingCooldown.set(uid, t));
-    userTasksClaimed.clear(); (d.userTasksClaimed || []).forEach(([uid, arr]) => userTasksClaimed.set(uid, new Set(arr)));
-    userInvested.clear(); (d.userInvested || []).forEach(([uid, n]) => userInvested.set(uid, n));
-    userCompletedOrders.clear(); (d.userCompletedOrders || []).forEach(([uid, n]) => userCompletedOrders.set(uid, n));
-    paymentClaims.clear(); (d.paymentClaims || []).forEach(([uid, c]) => paymentClaims.set(uid, c));
-    manualCredits.length = 0; (d.manualCredits || []).forEach(c => manualCredits.push(c));
-    userInfos.clear(); (d.userInfos || []).forEach(([uid, info]) => userInfos.set(uid, info));
-    deniedClaims.clear(); (d.deniedClaims || []).forEach(([uid, n]) => deniedClaims.set(uid, n));
+    // Сначала пробуем загрузить из локального файла
+    if (fs.existsSync(DATA_FILE)) {
+      const d = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+      if (d && Object.keys(d).length > 0) {
+        await loadFromData(d);
+        console.log('📂 Данные загружены из локального файла');
+        return;
+      }
+    }
+    // Если локальный файл пустой или отсутствует — пробуем GitHub Gist
+    console.log('📂 Локальный файл пуст, пробуем загрузить из GitHub Gist...');
+    const loaded = await loadFromGist();
+    if (loaded) {
+      // Сохраняем локально для быстрого доступа
+      await saveState();
+      return;
+    }
+    console.log('⚠️ Данные не найдены ни локально, ни в Gist. Запуск с чистого состояния.');
   } catch (e) { console.error('State load error:', e.message); }
+}
+
+async function loadFromData(d) {
+  nextOrderId = d.nextOrderId || 1;
+  orders.clear(); (d.orders || []).forEach(([id, o]) => orders.set(id, o));
+  userStars.clear(); (d.userStars || []).forEach(([uid, n]) => userStars.set(uid, n));
+  userCoins.clear(); (d.userCoins || []).forEach(([uid, n]) => userCoins.set(uid, n));
+  userLang.clear(); (d.userLang || []).forEach(([uid, l]) => userLang.set(uid, l));
+  ownedTitles.clear(); (d.ownedTitles || []).forEach(([uid, arr]) => ownedTitles.set(uid, new Set(arr)));
+  activeTitle.clear(); (d.activeTitle || []).forEach(([uid, t]) => activeTitle.set(uid, t));
+  agreed.clear(); (d.agreed || []).forEach(x => agreed.add(String(x)));
+  banned.clear(); (d.banned || []).forEach(x => banned.add(String(x)));
+  restricted.clear(); (d.restricted || []).forEach(x => restricted.add(String(x)));
+  admins.clear(); (d.admins || [MAIN_ADMIN]).forEach(x => admins.add(String(x)));
+  users.clear(); (d.users || []).forEach(x => users.add(String(x)));
+  transactions.length = 0; (d.transactions || []).forEach(t => transactions.push(t));
+  referrals.clear(); (d.referrals || []).forEach(([inv, arr]) => referrals.set(inv, new Set(arr)));
+  invitedBy.clear(); (d.invitedBy || []).forEach(([u, inv]) => invitedBy.set(u, inv));
+  referralCount.clear(); (d.referralCount || []).forEach(([inv, n]) => referralCount.set(inv, n));
+  userFish.clear(); (d.userFish || []).forEach(([uid, arr]) => userFish.set(uid, arr));
+  userInventory.clear(); (d.userInventory || []).forEach(([uid, arr]) => userInventory.set(uid, arr));
+  mail.clear(); (d.mail || []).forEach(([uid, arr]) => mail.set(uid, arr));
+  news.length = 0; (d.news || []).forEach(n => news.push(n));
+  videos.clear(); (d.videos || []).forEach(([id, v]) => videos.set(id, v));
+  nextVideoId = d.nextVideoId || 1;
+  auction.clear(); (d.auction || []).forEach(([id, a]) => auction.set(id, a));
+  nextAuctionId = d.nextAuctionId || 1;
+  userProfiles.clear(); (d.userProfiles || []).forEach(([uid, p]) => userProfiles.set(uid, p));
+  fishingCooldown.clear(); (d.fishingCooldown || []).forEach(([uid, t]) => fishingCooldown.set(uid, t));
+  userTasksClaimed.clear(); (d.userTasksClaimed || []).forEach(([uid, arr]) => userTasksClaimed.set(uid, new Set(arr)));
+  userInvested.clear(); (d.userInvested || []).forEach(([uid, n]) => userInvested.set(uid, n));
+  userCompletedOrders.clear(); (d.userCompletedOrders || []).forEach(([uid, n]) => userCompletedOrders.set(uid, n));
+  paymentClaims.clear(); (d.paymentClaims || []).forEach(([uid, c]) => paymentClaims.set(uid, c));
+  manualCredits.length = 0; (d.manualCredits || []).forEach(c => manualCredits.push(c));
+  userInfos.clear(); (d.userInfos || []).forEach(([uid, info]) => userInfos.set(uid, info));
+  deniedClaims.clear(); (d.deniedClaims || []).forEach(([uid, n]) => deniedClaims.set(uid, n));
 }
 
 function saveState() {
@@ -383,7 +410,119 @@ function saveState() {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data));
   } catch (e) { console.error('State save error:', e.message); }
 }
-loadState();
+// ========== GitHub Gist Persistent Storage ==========
+async function syncToGist() {
+  if (!GIST_ID || !GITHUB_TOKEN || gistSyncProcessing) return;
+  gistSyncProcessing = true;
+  try {
+    const data = {
+      nextOrderId, orders: [...orders.entries()],
+      userStars: [...userStars.entries()], userCoins: [...userCoins.entries()],
+      userLang: [...userLang.entries()],
+      ownedTitles: [...ownedTitles.entries()].map(([uid, set]) => [uid, [...set]]),
+      activeTitle: [...activeTitle.entries()],
+      agreed: [...agreed], banned: [...banned], restricted: [...restricted],
+      admins: [...admins], users: [...users],
+      transactions: transactions.slice(-2000),
+      referrals: [...referrals.entries()].map(([inv, set]) => [inv, [...set]]),
+      invitedBy: [...invitedBy.entries()], referralCount: [...referralCount.entries()],
+      userFish: [...userFish.entries()], userInventory: [...userInventory.entries()],
+      mail: [...mail.entries()], news: news.slice(-100),
+      videos: [...videos.entries()], nextVideoId,
+      auction: [...auction.entries()], nextAuctionId,
+      userProfiles: [...userProfiles.entries()],
+      fishingCooldown: [...fishingCooldown.entries()],
+      userTasksClaimed: [...userTasksClaimed.entries()].map(([uid, set]) => [uid, [...set]]),
+      userInvested: [...userInvested.entries()],
+      userCompletedOrders: [...userCompletedOrders.entries()],
+      paymentClaims: [...paymentClaims.entries()],
+      manualCredits: manualCredits.slice(-500),
+      userInfos: [...userInfos.entries()],
+      deniedClaims: [...deniedClaims.entries()],
+      _syncedAt: Date.now(),
+    };
+    const response = await fetch(GIST_API_URL, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        files: { [GIST_FILENAME]: { content: JSON.stringify(data) } }
+      }),
+    });
+    if (!response.ok) {
+      const err = await response.text();
+      console.error('Gist sync failed:', response.status, err);
+    } else {
+      console.log('☁️ Данные синхронизированы с GitHub Gist');
+    }
+  } catch (e) {
+    console.error('Gist sync error:', e.message);
+  } finally {
+    gistSyncProcessing = false;
+  }
+}
+
+async function loadFromGist() {
+  if (!GIST_ID || !GITHUB_TOKEN) return false;
+  try {
+    const response = await fetch(GIST_API_URL, {
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json',
+      },
+    });
+    if (!response.ok) return false;
+    const gist = await response.json();
+    const content = gist.files?.[GIST_FILENAME]?.content;
+    if (!content) return false;
+    const data = JSON.parse(content);
+    // Загружаем данные в память
+    nextOrderId = data.nextOrderId || 1;
+    orders.clear(); (data.orders || []).forEach(([k, v]) => orders.set(k, v));
+    userStars.clear(); (data.userStars || []).forEach(([k, v]) => userStars.set(k, v));
+    userCoins.clear(); (data.userCoins || []).forEach(([k, v]) => userCoins.set(k, v));
+    userLang.clear(); (data.userLang || []).forEach(([k, v]) => userLang.set(k, v));
+    ownedTitles.clear(); (data.ownedTitles || []).forEach(([uid, arr]) => ownedTitles.set(uid, new Set(arr)));
+    activeTitle.clear(); (data.activeTitle || []).forEach(([k, v]) => activeTitle.set(k, v));
+    agreed.clear(); (data.agreed || []).forEach(k => agreed.add(k));
+    banned.clear(); (data.banned || []).forEach(k => banned.add(k));
+    restricted.clear(); (data.restricted || []).forEach(k => restricted.add(k));
+    admins.clear(); (data.admins || []).forEach(k => admins.add(k));
+    users.clear(); (data.users || []).forEach(k => users.add(k));
+    transactions.length = 0; (data.transactions || []).forEach(t => transactions.push(t));
+    referrals.clear(); (data.referrals || []).forEach(([inv, arr]) => referrals.set(inv, new Set(arr)));
+    invitedBy.clear(); (data.invitedBy || []).forEach(([k, v]) => invitedBy.set(k, v));
+    referralCount.clear(); (data.referralCount || []).forEach(([k, v]) => referralCount.set(k, v));
+    userFish.clear(); (data.userFish || []).forEach(([k, v]) => userFish.set(k, v));
+    userInventory.clear(); (data.userInventory || []).forEach(([k, v]) => userInventory.set(k, v));
+    mail.clear(); (data.mail || []).forEach(([k, v]) => mail.set(k, v));
+    news.length = 0; (data.news || []).forEach(n => news.push(n));
+    videos.clear(); (data.videos || []).forEach(([k, v]) => videos.set(k, v));
+    nextVideoId = data.nextVideoId || 1;
+    auction.clear(); (data.auction || []).forEach(([k, v]) => auction.set(k, v));
+    nextAuctionId = data.nextAuctionId || 1;
+    userProfiles.clear(); (data.userProfiles || []).forEach(([k, v]) => userProfiles.set(k, v));
+    fishingCooldown.clear(); (data.fishingCooldown || []).forEach(([k, v]) => fishingCooldown.set(k, v));
+    userTasksClaimed.clear(); (data.userTasksClaimed || []).forEach(([uid, arr]) => userTasksClaimed.set(uid, new Set(arr)));
+    userInvested.clear(); (data.userInvested || []).forEach(([k, v]) => userInvested.set(k, v));
+    userCompletedOrders.clear(); (data.userCompletedOrders || []).forEach(([k, v]) => userCompletedOrders.set(k, v));
+    paymentClaims.clear(); (data.paymentClaims || []).forEach(([k, v]) => paymentClaims.set(k, v));
+    manualCredits.length = 0; (data.manualCredits || []).forEach(c => manualCredits.push(c));
+    userInfos.clear(); (data.userInfos || []).forEach(([k, v]) => userInfos.set(k, v));
+    deniedClaims.clear(); (data.deniedClaims || []).forEach(([k, v]) => deniedClaims.set(k, v));
+    console.log('☁️ Данные загружены из GitHub Gist');
+    return true;
+  } catch (e) {
+    console.error('Gist load error:', e.message);
+    return false;
+  }
+}
+
+// Авто-синхронизация каждые 5 минут
+setInterval(syncToGist, GIST_SYNC_INTERVAL);
 
 function getStars(uid) { return userStars.get(String(uid)) || 0; }
 function addStars(uid, n) { userStars.set(String(uid), getStars(uid) + n); scheduleSaveState(); }
@@ -2259,6 +2398,14 @@ async function startBot() {
     logError('🗑 Вторичная очистка вебхука выполнена');
   } catch (e) {
     logError('⚠️ Вторичная очистка вебхука не удалась: ' + (e && e.stack ? e.stack : String(e)));
+  }
+
+  // === СЛОЙ 5.6: Загрузка состояния (локальный файл → GitHub Gist) ===
+  try {
+    await loadState();
+    logError('✅ Состояние загружено');
+  } catch (e) {
+    logError('⚠️ Ошибка загрузки состояния: ' + (e && e.stack ? e.stack : String(e)));
   }
 
   // === СЛОЙ 6: Запуск polling с полной защитой ===
