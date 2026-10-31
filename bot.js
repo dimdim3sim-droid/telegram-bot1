@@ -77,6 +77,7 @@ const MESSAGE_RATE_LIMIT = 2000; // Мин. интервал между сооб
 const MAX_MESSAGES_PER_MINUTE = 20; // Макс. сообщений в минуту на пользователя
 const userMessageTimes = new Map(); // uid -> [timestamps]
 const lastSentMessage = new Map(); // uid -> {text, time}
+const lastMenuHint = new Map(); // uid -> время последней подсказки меню
 const SPAM_DETECTION_WINDOW = 60000; // Окно обнаружения спама (1 мин)
 const MAX_SAME_MESSAGE_REPEATS = 3; // Макс. повторов одного и того же текста
 
@@ -1832,6 +1833,9 @@ bot.on('text', async (ctx) => {
   const state = userState.get(uid);
   const text = ctx.message.text;
 
+  // /start обрабатывается в bot.start — не обрабатываем дважды (фикс спама)
+  if (text && text.startsWith('/start')) return;
+
   if (text === '/cancel' || text === 'Отмена') {
     userState.delete(uid);
     await ctx.reply('❌ Отменено. / Cancelled.', mainMenu(uid));
@@ -2048,7 +2052,15 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  await ctx.reply(menuText(uid), mainMenu(uid));
+  // Не спамим меню на каждое сообщение — только короткая подсказка с кулдауном
+  const hintKey = String(uid);
+  const lastHint = lastMenuHint.get(hintKey) || 0;
+  if (Date.now() - lastHint > 10000) {
+    lastMenuHint.set(hintKey, Date.now());
+    try {
+      await ctx.reply('👋 Нажми /start для меню.');
+    } catch (e) {}
+  }
 });
 
 // ---- Media handler ----
