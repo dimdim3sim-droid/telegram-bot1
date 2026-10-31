@@ -2144,6 +2144,17 @@ bot.on('error', (err) => {
   notifyAdmin(msg, true);
 });
 
+// --- Обработка polling_error (409 Conflict и др. ошибки polling) ---
+bot.on('polling_error', (err) => {
+  const msg = 'Polling error: ' + (err && err.message ? err.message : String(err));
+  logError(msg);
+  if (msg.includes('409') || msg.includes('Conflict')) {
+    notifyAdmin('⚠️ <b>409 Conflict в polling</b>\n\nДругой инстанс бота уже запущен. Ждём 30 сек и пробуем снова.', true);
+  } else {
+    notifyAdmin(msg, true);
+  }
+});
+
 process.on('uncaughtException', (err) => {
   const msg = 'UNCAUGHT EXCEPTION: ' + (err && err.stack ? err.stack : String(err));
   logError(msg);
