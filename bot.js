@@ -72,6 +72,65 @@ const BACKUP_VERIFICATION_INTERVAL = 6 * 60 * 60 * 1000; // Проверка б�
 const RESTORE_TEST_INTERVAL = 24 * 60 * 60 * 1000; // Тест восстановления раз в сутки
 const ADMIN_ALERT_INTERVAL = 60 * 60 * 1000; // Уведомления админа не чаще раза в час
 
+// ========== АНТИ-СПАМ ЗАЩИТА ==========
+const MESSAGE_RATE_LIMIT = 2000; // Мин. интервал между сообщениями одному пользователю (мс)
+const MAX_MESSAGES_PER_MINUTE = 20; // Макс. сообщений в минуту на пользователя
+const userMessageTimes = new Map(); // uid -> [timestamps]
+const lastSentMessage = new Map(); // uid -> {text, time}
+const SPAM_DETECTION_WINDOW = 60000; // Окно обнаружения спама (1 мин)
+const MAX_SAME_MESSAGE_REPEATS = 3; // Макс. повторов одного и того же текста
+
+// ========== АНТИ-СПАМ ФУНКЦИИ ==========
+function checkSpam(uid, text) {
+  const now = Date.now();
+  const key = String(uid);
+  
+  // Очистка старых записей
+  const times = userMessageTimes.get(key) || [];
+  const recent = times.filter(t => now - t < SPAM_DETECTION_WINDOW);
+  userMessageTimes.set(key, recent);
+  
+  // Проверка частоты сообщений
+  if (recent.length >= MAX_MESSAGES_PER_MINUTE) {
+    logError(`⚠️ SPAM BLOCKED: User ${uid} exceeded ${MAX_MESSAGES_PER_MINUTE} msg/min`);
+    return false;
+  }
+  
+  // Проверка повторов одного и того же текста
+  const lastMsg = lastSentMessage.get(key);
+  if (lastMsg && lastMsg.text === text && now - lastMsg.time < SPAM_DETECTION_WINDOW) {
+    if ((lastMsg.repeats || 0) >= MAX_SAME_MESSAGE_REPEATS) {
+      logError(`⚠️ SPAM BLOCKED: User ${uid} repeated same message ${MAX_SAME_MESSAGE_REPEATS} times`);
+      return false;
+    }
+    lastMsg.repeats = (lastMsg.repeats || 1) + 1;
+    lastMsg.time = now;
+  } else {
+    lastSentMessage.set(key, { text, time: now, repeats: 1 });
+  }
+  
+  // Проверка минимального интервала
+  if (recent.length > 0 && now - recent[recent.length - 1] < MESSAGE_RATE_LIMIT) {
+    logError(`⚠️ SPAM BLOCKED: User ${uid} sent message too fast (<${MESSAGE_RATE_LIMIT}ms)`);
+    return false;
+  }
+  
+  recent.push(now);
+  return true;
+}
+
+function safeSendMessage(uid, text, markup) {
+  if (!checkSpam(uid, text)) return Promise.resolve();
+  return bot.telegram.sendMessage(uid, text, markup);
+}
+
+function safeEditMessage(ctx, text, markup) {
+  const uid = ctx.from?.id || ctx.chat?.id;
+  if (!uid) return Promise.resolve();
+  if (!checkSpam(uid, text)) return Promise.resolve();
+  return ctx.editMessageText(text, markup).catch(() => {});
+}
+
 const bot = new Telegraf(BOT_TOKEN);
 
 const orders = new Map();
@@ -714,9 +773,9 @@ bot.start(async (ctx) => {
     info.name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ');
     userInfos.set(String(uid), info);
     saveState();
-    if (isBanned(uid)) { await ctx.reply('🚫 Вы забанены. / You are banned.'); return; }
+    if (isBanned(uid)) { await safeSendMessage(uid, '🚫 Вы забанены. / You are banned.'); return; }
     if (!agreed.has(String(uid))) {
-      await ctx.reply(AGREEMENT, Markup.inlineKeyboard([[Markup.button.callback('✅ Принимаю / Accept', 'agree_yes'), Markup.button.callback('❌ Отказываюсь / Decline', 'agree_no')]]));
+      await safeSendMessage(uid, AGREEMENT, Markup.inlineKeyboard([[Markup.button.callback('✅ Принимаю / Accept', 'agree_yes'), Markup.button.callback('❌ Отказываюсь / Decline', 'agree_no')]]));
       return;
     }
     const payload = (ctx.startPayload || '').toString();
@@ -729,24 +788,24 @@ bot.start(async (ctx) => {
         referralCount.set(inviter, (referralCount.get(inviter) || 0) + 1);
         addCoins(inviter, 1);
         saveState();
-        try { await bot.telegram.sendMessage(inviter, `🎉 Новый приглашённый! +1 🪙\nВсего приглашено: ${referralCount.get(inviter)}`); } catch (e) {}
+        try { await safeSendMessage(inviter, `🎉 Новый приглашённый! +1 🪙\nВсего приглашено: ${referralCount.get(inviter)}`); } catch (e) {}
       }
     }
     if (payload.startsWith('order_')) {
       const id = parseInt(payload.split('_')[1]);
       const order = orders.get(id);
-      if (!order) { await ctx.reply('❌ Заказ не найден. / Order not found.', mainMenu(uid)); return; }
+      if (!order) { await safeSendMessage(uid, '❌ Заказ не найден. / Order not found.', mainMenu(uid)); return; }
       let text = `📋 Заказ #${order.id}\n\n${order.description}\n\n${order.currency === 'coins' ? '🪙' : '⭐'} ${order.amount}\nСтатус: ${order.status}`;
       const kb = order.status === 'open'
         ? Markup.inlineKeyboard([[Markup.button.callback('⚡ Взять заказ / Take', `take_${order.id}`)], [Markup.button.callback(t(uid, 'back'), 'back_main')]])
         : mainMenu(uid);
-      await ctx.reply(text, kb);
+      await safeSendMessage(uid, text, kb);
       return;
     }
-    await ctx.reply(menuText(uid), mainMenu(uid));
+    await safeSendMessage(uid, menuText(uid), mainMenu(uid));
   } catch (e) {
     logError('bot.start error: ' + (e && e.stack ? e.stack : String(e)));
-    try { await ctx.reply('⚠️ Внутренняя ошибка при запуске. Попробуйте позже. / Internal error on start.'); } catch (err) {}
+    try { await safeSendMessage(uid, '⚠️ Внутренняя ошибка при запуске. Попробуйте позже. / Internal error on start.'); } catch (err) {}
   }
 });
 
