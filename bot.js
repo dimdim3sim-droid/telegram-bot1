@@ -2111,6 +2111,42 @@ let isBotRunning = false;
 let restartTimeout = null;
 let pollingLoop = null;
 
+// Файловый лок для предотвращения множественных экземпляров
+const LOCK_FILE = path.join(__dirname, '.bot.lock');
+async function acquireLock() {
+  try {
+    // Проверяем, не запущен ли уже бот
+    if (fs.existsSync(LOCK_FILE)) {
+      const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim());
+      try {
+        process.kill(pid, 0); // Проверка существования процесса
+        console.log(`⚠️ Другой экземпляр бота уже запущен (PID: ${pid}), ждём...`);
+        return false;
+      } catch (e) {
+        // Процесс не существует, удаляем старый лок
+        fs.unlinkSync(LOCK_FILE);
+      }
+    }
+    // Создаём лок
+    fs.writeFileSync(LOCK_FILE, String(process.pid));
+    return true;
+  } catch (e) {
+    console.error('Lock error: ' + (e && e.message ? e.message : String(e)));
+    return true; // В случае ошибки лока - разрешаем запуск
+  }
+}
+
+function releaseLock() {
+  try {
+    if (fs.existsSync(LOCK_FILE)) {
+      const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim());
+      if (pid === process.pid) {
+        fs.unlinkSync(LOCK_FILE);
+      }
+    }
+  } catch (e) {}
+}
+
 // Отменяем pending restart при новом запуске
 function cancelRestart() {
   if (restartTimeout) {
@@ -2171,6 +2207,18 @@ async function startBot() {
     return;
   }
 
+  // Задержка перед запуском для Render auto-deploy (даёт время старому инстансу остановиться)
+  console.log('⏳ Ожидание 10 сек перед запуском (Render auto-deploy protection)...');
+  await new Promise(r => setTimeout(r, 10000));
+
+  // Пытаемся захватить лок
+  const hasLock = await acquireLock();
+  if (!hasLock) {
+    console.log('🔒 Не удалось захватить лок, ждём 30 сек и пробуем снова...');
+    await new Promise(r => setTimeout(r, 30000));
+    return startBot();
+  }
+
   try {
     await ensureBotInfo();
   } catch (e) {
@@ -2207,6 +2255,8 @@ async function startBot() {
     }
     console.log(`🔄 Перезапуск polling через ${delay / 1000} сек (попытка ${startRetries})`);
     restartTimeout = setTimeout(startBot, delay);
+  } finally {
+    releaseLock();
   }
 }
 
@@ -2223,6 +2273,7 @@ process.on('SIGINT', () => {
   logError('SIGINT received, stopping bot...');
   try { saveState(); } catch (e) {}
   try { if (pollingLoop) pollingLoop.stop(); } catch (e) {}
+  releaseLock();
   process.exit(0);
 });
 
@@ -2230,5 +2281,6 @@ process.on('SIGTERM', () => {
   logError('SIGTERM received, stopping bot...');
   try { saveState(); } catch (e) {}
   try { if (pollingLoop) pollingLoop.stop(); } catch (e) {}
+  releaseLock();
   process.exit(0);
 });
