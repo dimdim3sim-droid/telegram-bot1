@@ -2123,17 +2123,38 @@ function logError(msg) {
   console.error(msg);
 }
 
+// --- Уведомления админа о критических ошибках ---
+let lastAdminAlert = 0;
+const ADMIN_ALERT_COOLDOWN = 60 * 1000; // 1 минута между уведомлениями
+async function notifyAdmin(msg, isCritical = false) {
+  try {
+    const now = Date.now();
+    if (!isCritical && now - lastAdminAlert < ADMIN_ALERT_COOLDOWN) return;
+    lastAdminAlert = now;
+    const text = `⚠️ <b>Ошибка бота</b>\n\n${msg}\n\n⏰ ${new Date().toLocaleString()}`;
+    await bot.telegram.sendMessage(Number(MAIN_ADMIN), text, { parse_mode: 'HTML' });
+  } catch (e) {
+    console.error('Failed to notify admin:', e.message);
+  }
+}
+
 bot.on('error', (err) => {
-  logError('Bot error: ' + (err && err.message ? err.message : String(err)));
+  const msg = 'Bot error: ' + (err && err.message ? err.message : String(err));
+  logError(msg);
+  notifyAdmin(msg, true);
 });
 
 process.on('uncaughtException', (err) => {
-  logError('UNCAUGHT EXCEPTION: ' + (err && err.stack ? err.stack : String(err)));
+  const msg = 'UNCAUGHT EXCEPTION: ' + (err && err.stack ? err.stack : String(err));
+  logError(msg);
+  notifyAdmin(msg, true);
   // Не роняем процесс — логируем и продолжаем
 });
 
 process.on('unhandledRejection', (reason) => {
-  logError('UNHANDLED REJECTION: ' + (reason && reason.stack ? reason.stack : String(reason)));
+  const msg = 'UNHANDLED REJECTION: ' + (reason && reason.stack ? reason.stack : String(reason));
+  logError(msg);
+  notifyAdmin(msg, true);
 });
 
 // --- Простой HTTP сервер для пинга (чтобы Render не засыпал) ---
@@ -2395,13 +2416,17 @@ async function runPollingLoop() {
         allowedUpdates: ['message', 'callback_query', 'pre_checkout_query', 'successful_payment']
       });
       logError('⚠️ bot.launch() завершился неожиданно, перезапуск через 5 сек...');
+      notifyAdmin('⚠️ <b>Polling упал</b>\n\nBot.launch() завершился неожиданно. Авто-перезапуск через 5 сек.', true);
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
       if (msg.includes('409') || msg.includes('Conflict')) {
         logError('⚠️ 409 Conflict: другой инстанс бота уже запущен. Ждём 30 сек и пробуем снова...');
+        notifyAdmin('⚠️ <b>409 Conflict</b>\n\nДругой инстанс бота уже запущен. Ждём 30 сек и пробуем снова.', true);
         await new Promise(r => setTimeout(r, 30000));
       } else {
-        logError('❌ Bot launch error: ' + (e && e.stack ? e.stack : String(e)));
+        const errMsg = '❌ Bot launch error: ' + (e && e.stack ? e.stack : String(e));
+        logError(errMsg);
+        notifyAdmin(errMsg, true);
         await new Promise(r => setTimeout(r, 10000));
       }
     }
@@ -2409,6 +2434,7 @@ async function runPollingLoop() {
     consecutiveErrors++;
     if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
       logError('⚠️ Слишком много ошибок подряд (' + MAX_CONSECUTIVE_ERRORS + '), ждём 5 минут...');
+      notifyAdmin('⚠️ <b>Слишком много ошибок</b>\n\n' + MAX_CONSECUTIVE_ERRORS + ' ошибок подряд. Ждём 5 минут перед перезапуском.', true);
       await new Promise(r => setTimeout(r, 300000));
       consecutiveErrors = 0;
     } else {
@@ -2436,6 +2462,7 @@ async function startBot() {
   }
   if (!lockAcquired) {
     logError('❌ Не удалось получить лок после 10 попыток. Ждём 30 сек и пробуем снова.');
+    notifyAdmin('❌ <b>Не удалось получить лок</b>\n\nПосле 10 попыток лок не получен. Ждём 30 сек и пробуем снова.', true);
     isBotRunning = false;
     setTimeout(startBot, 30000);
     return;
@@ -2473,7 +2500,9 @@ async function startBot() {
     await loadState();
     logError('✅ Состояние загружено');
   } catch (e) {
-    logError('⚠️ Ошибка загрузки состояния: ' + (e && e.stack ? e.stack : String(e)));
+    const errMsg = '⚠️ Ошибка загрузки состояния: ' + (e && e.stack ? e.stack : String(e));
+    logError(errMsg);
+    notifyAdmin(errMsg, true);
   }
 
   // === СЛОЙ 6: Запуск polling с полной защитой ===
@@ -2481,24 +2510,30 @@ async function startBot() {
     startRetries = 0;
     logError('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
     logError('Bot launched OK');
+    notifyAdmin('✅ <b>Бот успешно запущен</b>\n\n🚀 Бот запущен и готов к работе.', false);
     
     // === СЛОЙ 7: Запуск polling с автоматическим перезапуском ===
     await runPollingLoop();
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
-    logError('❌ Bot launch error: ' + (e && e.stack ? e.stack : String(e)));
+    const errMsg = '❌ Bot launch error: ' + (e && e.stack ? e.stack : String(e));
+    logError(errMsg);
+    notifyAdmin(errMsg, true);
     releaseLock();
     isBotRunning = false;
     startRetries++;
     const delay = Math.min(startRetries * 5000, 60000);
     logError(`🔄 Перезапуск через ${delay}мс (попытка ${startRetries})...`);
+    notifyAdmin(`🔄 <b>Перезапуск бота</b>\n\nПопытка ${startRetries}. Ждём ${delay}мс перед перезапуском.`, true);
     setTimeout(startBot, delay);
   }
 }
 
 // Запуск бота
 startBot().catch((e) => {
-  logError('startBot crashed: ' + (e && e.stack ? e.stack : String(e)));
+  const errMsg = 'startBot crashed: ' + (e && e.stack ? e.stack : String(e));
+  logError(errMsg);
+  notifyAdmin(errMsg, true);
   setTimeout(() => {
     startBot();
   }, 5000);
@@ -2507,6 +2542,7 @@ startBot().catch((e) => {
 // Дополнительная защита: если процесс получает сигнал остановки
 process.on('SIGINT', () => {
   logError('SIGINT received, stopping bot...');
+  notifyAdmin('🛑 <b>Бот остановлен (SIGINT)</b>\n\nПолучен сигнал прерывания. Graceful shutdown...', true);
   try { saveState(); } catch (e) {}
   try { if (pollingLoop) pollingLoop.stop(); } catch (e) {}
   releaseLock();
@@ -2515,6 +2551,7 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => {
   logError('SIGTERM received, stopping bot...');
+  notifyAdmin('🛑 <b>Бот остановлен (SIGTERM)</b>\n\nПолучен сигнал завершения. Graceful shutdown...', true);
   try { saveState(); } catch (e) {}
   try { if (pollingLoop) pollingLoop.stop(); } catch (e) {}
   releaseLock();
