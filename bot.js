@@ -120,16 +120,27 @@ function checkSpam(uid, text) {
   return true;
 }
 
+// Ответы бота (меню, кнопки) НЕ проходят через антиспам: иначе пользователь,
+// который быстро жмёт кнопки, перестаёт получать ответы вовсе.
 function safeSendMessage(uid, text, markup) {
-  if (!checkSpam(uid, text)) return Promise.resolve();
-  return bot.telegram.sendMessage(uid, text, markup);
+  return bot.telegram.sendMessage(uid, text, markup).catch((e) => {
+    const m = e && e.message ? e.message : String(e);
+    if (!m.includes('403') && !m.includes('blocked')) {
+      logError('safeSendMessage error: ' + m);
+    }
+    return null;
+  });
 }
 
 function safeEditMessage(ctx, text, markup) {
-  const uid = ctx.from?.id || ctx.chat?.id;
-  if (!uid) return Promise.resolve();
-  if (!checkSpam(uid, text)) return Promise.resolve();
-  return ctx.editMessageText(text, markup).catch(() => {});
+  return ctx.editMessageText(text, markup).catch((e) => {
+    const m = e && e.message ? e.message : String(e);
+    // "message is not modified" — не ошибка, просто тот же контент
+    if (!m.includes('message is not modified')) {
+      logError('safeEditMessage error: ' + m);
+    }
+    return null;
+  });
 }
 
 const bot = new Telegraf(BOT_TOKEN);
@@ -137,6 +148,10 @@ const bot = new Telegraf(BOT_TOKEN);
 const orders = new Map();
 let nextOrderId = 1;
 const userState = new Map();
+function setUserState(uid, state) {
+  state.at = Date.now(); // для очистки заброшенных состояний
+  userState.set(uid, state);
+}
 const userStars = new Map();
 const userCoins = new Map();
 const userLang = new Map();
@@ -183,7 +198,7 @@ function checkRateLimit(uid, command) {
   const key = String(uid);
 
   // Если пользователь в процессе заполнения формы — не блокируем
-  const st = userState.get(key);
+  const st = userState.get(uid) || userState.get(key);
   if (st && st.mode) return { ok: true };
 
   // Общий лимит сообщений
@@ -717,13 +732,13 @@ async function editMsg(ctx, text, markup) {
     // "message is not modified" — нормальная ситуация (меню уже такое), молчим
     if (msg.includes('message is not modified')) return;
     logError('editMsg failed: ' + msg);
-    // Фоллбек: отправляем новое сообщение (с защитой от спама), чтобы пользователь не застрял
+    // Фоллбек: отправляем новое сообщение, чтобы пользователь не застрял.
+    // Без checkSpam — это ответ на действие пользователя, а не спам.
     try {
-      const uid = ctx.from ? ctx.from.id : null;
-      if (uid && checkSpam(uid, text)) {
-        await ctx.reply(text, markup || {});
-      }
-    } catch (e2) {}
+      await ctx.reply(text, markup || {});
+    } catch (e2) {
+      logError('editMsg fallback reply failed: ' + ((e2 && e2.message) || String(e2)));
+    }
   }
 }
 
@@ -877,7 +892,7 @@ bot.action('profile_view_other', async (ctx) => {
   const uid = ctx.from.id;
   if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
   if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
-  userState.set(uid, { mode: 'profile_view', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'profile_view', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '🔍 Введи ID пользователя: / Enter user ID:', backKeyboard(uid));
 });
 
@@ -1030,7 +1045,7 @@ bot.action('order_create', async (ctx) => {
   if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
   if (!agreed.has(String(uid))) { await editMsg(ctx, AGREEMENT, Markup.inlineKeyboard([[Markup.button.callback('✅ Принимаю / Accept', 'agree_yes'), Markup.button.callback('❌ Отказываюсь / Decline', 'agree_no')]])); return; }
   if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены в создании заказов. / Restricted.', mainMenu(uid)); return; }
-  userState.set(uid, { mode: 'create_desc', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'create_desc', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '✏️ Опиши, что нужно сделать (текст заказа): / Describe the task:', backKeyboard(uid));
 });
 
@@ -1055,7 +1070,7 @@ bot.action(/^take_(\d+)$/, async (ctx) => {
   if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены в выполнении. / Restricted.', mainMenu(uid)); return; }
   order.status = 'taken';
   order.takerId = String(uid);
-  userState.set(uid, { mode: 'submit', orderId, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'submit', orderId, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   saveState();
   await editMsg(ctx, `✅ Взял заказ #${orderId}\n\n${order.description}\n\n${order.currency === 'coins' ? '🪙' : '⭐'} ${order.amount}\n🔗 ${orderLink(orderId)}\n\nОтправь результат (текст/фото/видео/файл): / Send result:`, backKeyboard(uid));
 });
@@ -1129,7 +1144,7 @@ bot.action('auction_sell', async (ctx) => {
   if (fish.length === 0) { await editMsg(ctx, '❌ Нет рыбы для продажи. / No fish to sell.', mainMenu(uid)); return; }
   const rows = fish.map((f, i) => [Markup.button.callback(`${f.emoji} ${f.name} (${f.rarity})`, `sellfish_${i}`)]);
   rows.push([Markup.button.callback(t(uid, 'back'), 'back_main')]);
-  userState.set(uid, { mode: 'auction_select', fish, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'auction_select', fish, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '💰 Выбери рыбу для выставления на аукцион: / Choose fish to list:', Markup.inlineKeyboard(rows));
 });
 
@@ -1141,7 +1156,7 @@ bot.action(/^sellfish_(\d+)$/, async (ctx) => {
   const idx = parseInt(ctx.match[1]);
   const fish = st.fish[idx];
   if (!fish) { await editMsg(ctx, '❌ Рыба не найдена. / Fish not found.', mainMenu(uid)); return; }
-  userState.set(uid, { mode: 'auction_price', fish, fishIndex: idx, fishList: st.fish, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'auction_price', fish, fishIndex: idx, fishList: st.fish, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, `💰 ${fish.emoji} ${fish.name}\nВведи цену в звёздах: / Enter price in stars:`, backKeyboard(uid));
 });
 
@@ -1195,7 +1210,7 @@ bot.action('video_create', async (ctx) => {
   const uid = ctx.from.id;
   if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
   if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
-  userState.set(uid, { mode: 'video_title', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'video_title', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '🎬 Введи название видео: / Enter video title:', backKeyboard(uid));
 });
 
@@ -1204,7 +1219,7 @@ bot.action('video_search', async (ctx) => {
   const uid = ctx.from.id;
   if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
   if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
-  userState.set(uid, { mode: 'video_search', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'video_search', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '🔍 Введи название для поиска: / Enter search query:', backKeyboard(uid));
 });
 
@@ -1241,7 +1256,7 @@ bot.action(/^invest_(\d+)$/, async (ctx) => {
   const id = parseInt(ctx.match[1]);
   const video = videos.get(id);
   if (!video) { await editMsg(ctx, '❌ Видео не найдено. / Video not found.', mainMenu(uid)); return; }
-  userState.set(uid, { mode: 'invest_amount', videoId: id, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'invest_amount', videoId: id, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '💰 Сколько монет инвестировать? / How many coins to invest?', backKeyboard(uid));
 });
 
@@ -1261,7 +1276,7 @@ bot.action('donate', async (ctx) => {
   const uid = ctx.from.id;
   if (isBanned(uid)) { await editMsg(ctx, '🚫 Вы забанены. / Banned.', mainMenu(uid)); return; }
   if (isRestricted(uid)) { await editMsg(ctx, '⛔ Вы ограничены. / Restricted.', mainMenu(uid)); return; }
-  userState.set(uid, { mode: 'donate_target', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'donate_target', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '💰 Введи ID пользователя для доната игровой валюты: / Enter user ID to donate coins:', backKeyboard(uid));
 });
 
@@ -1273,7 +1288,7 @@ bot.action(/^donate_to_(\d+)$/, async (ctx) => {
   if (isBanned(target)) { await editMsg(ctx, '❌ Этот пользователь забанен. / User is banned.', backKeyboard(uid)); return; }
   if (isRestricted(target)) { await editMsg(ctx, '⛔ Этот пользователь ограничен. / User is restricted.', backKeyboard(uid)); return; }
   if (target === String(uid)) { await editMsg(ctx, '❌ Нельзя донатить себе. / Cannot donate to yourself.', backKeyboard(uid)); return; }
-  userState.set(uid, { mode: 'donate_target', target });
+  setUserState(uid, { mode: 'donate_amount', target, promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await ctx.reply(`💰 Сколько монет донатить пользователю ${target}? / How many coins to donate to ${target}?`);
 });
 
@@ -1373,7 +1388,7 @@ bot.action(/^cred_user_(\d+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const uid = ctx.from.id;
   const target = ctx.match[1];
-  userState.set(uid, { mode: 'cred_amount', target });
+  setUserState(uid, { mode: 'cred_amount', target });
   await ctx.reply(`💰 Сколько ⭐ начислить пользователю ${target}?\nВведи число (например, 70).\nОтмена: /cancel`);
 });
 
@@ -1453,7 +1468,7 @@ bot.action(/^claim_credit_(\d+)$/, async (ctx) => {
   if (isRestricted(target)) { await editMsg(ctx, '⛔ Этот пользователь ограничен. / User is restricted.', backKeyboard(ctx.from.id)); return; }
   paymentClaims.delete(target);
   saveState();
-  userState.set(ctx.from.id, { mode: 'cred_amount', target, note: 'Заявка из канала' });
+  setUserState(ctx.from.id, { mode: 'cred_amount', target, note: 'Заявка из канала' });
   await ctx.reply(`💳 Сколько ⭐ начислить пользователю ${target}?\nВведи число (например, 70).\nОтмена: /cancel`);
 });
 
@@ -1520,7 +1535,7 @@ bot.action('admin_news_create', async (ctx) => {
   await ctx.answerCbQuery();
   if (!isAdmin(ctx.from.id)) return;
   const uid = ctx.from.id;
-  userState.set(uid, { mode: 'news_create', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'news_create', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '📝 Введи текст новости (макс. 2000 символов):\n\n/Enter news text (max 2000 chars):', backKeyboard(uid));
 });
 
@@ -1528,7 +1543,7 @@ bot.action('admin_news_broadcast', async (ctx) => {
   await ctx.answerCbQuery();
   if (!isAdmin(ctx.from.id)) return;
   const uid = ctx.from.id;
-  userState.set(uid, { mode: 'news_broadcast', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
+  setUserState(uid, { mode: 'news_broadcast', promptMsgId: ctx.callbackQuery.message.message_id, chatId: ctx.callbackQuery.message.chat.id });
   await editMsg(ctx, '📢 Введи текст для рассылки ВСЕМ пользователям (макс. 2000 символов):\n\n/Enter text to broadcast to ALL users (max 2000 chars):', backKeyboard(uid));
 });
 
@@ -1799,10 +1814,12 @@ async function handleAdminCommand(ctx, text) {
     if (!/^\d+$/.test(target)) { await ctx.reply('❌ Неверный ID пользователя. / Invalid user ID.'); return; }
     if (isBanned(target)) { await ctx.reply('🚫 Этот пользователь забанен. / User is banned.'); return; }
     if (isRestricted(target)) { await ctx.reply('⛔ Этот пользователь ограничен. / User is restricted.'); return; }
-    addCoins(target, amount);
     if (title) {
       const titleObj = TITLES.find(t => t.id === title);
       if (!titleObj) { await ctx.reply('❌ Такого титула не существует. / Title does not exist.'); return; }
+    }
+    addCoins(target, amount);
+    if (title) {
       const owned = ownedTitles.get(String(target)) || new Set();
       owned.add(title);
       ownedTitles.set(String(target), owned);
@@ -1869,7 +1886,7 @@ bot.on('text', async (ctx) => {
     if (text.length > 2000) { await editPrompt(uid, '❌ Описание слишком длинное. Максимум 2000 символов. / Description too long. Max 2000 chars.', backKeyboard(uid)); return; }
     state.description = sanitizeInput(text);
     state.mode = 'create_amount';
-    userState.set(uid, state);
+    setUserState(uid, state);
     await editPrompt(uid, '⭐ Сколько звёзд/монет заплатить за заказ? (число)\n📌 Минимум за звёзды — 20 ⭐ / How many stars/coins? (min 20 for stars)', backKeyboard(uid));
     return;
   }
@@ -1880,7 +1897,7 @@ bot.on('text', async (ctx) => {
     if (n > 100000) { await editPrompt(uid, '❌ Слишком большая сумма. Максимум 100 000. / Too large amount. Max 100 000.', backKeyboard(uid)); return; }
     state.amount = n;
     state.mode = 'create_currency';
-    userState.set(uid, state);
+    setUserState(uid, state);
     await editPrompt(uid, 'Выбери валюту заказа: / Choose order currency:', Markup.inlineKeyboard([
       [Markup.button.callback('⭐ Звёзды / Stars', 'order_currency_stars')],
       [Markup.button.callback('🪙 Монеты / Coins', 'order_currency_coins')],
@@ -1916,7 +1933,7 @@ bot.on('text', async (ctx) => {
     if (text.length > 200) { await editPrompt(uid, '❌ Название слишком длинное. Максимум 200 символов. / Title too long. Max 200 chars.', backKeyboard(uid)); return; }
     state.title = sanitizeInput(text);
     state.mode = 'video_desc';
-    userState.set(uid, state);
+    setUserState(uid, state);
     await editPrompt(uid, '🎬 Введи описание видео: / Enter video description:', backKeyboard(uid));
     return;
   }
@@ -1924,7 +1941,7 @@ bot.on('text', async (ctx) => {
     if (text.length > 1000) { await editPrompt(uid, '❌ Описание слишком длинное. Максимум 1000 символов. / Description too long. Max 1000 chars.', backKeyboard(uid)); return; }
     state.description = sanitizeInput(text);
     state.mode = 'video_upload';
-    userState.set(uid, state);
+    setUserState(uid, state);
     await editPrompt(uid, '🎬 Теперь пришли видеоролик (видео или файл) — он будет показываться зрителям.\nМожно пропустить: /skip\n\nNow send your video (or file) — viewers will see it. Skip: /skip', backKeyboard(uid));
     return;
   }
@@ -2003,7 +2020,7 @@ bot.on('text', async (ctx) => {
     if (target === String(uid)) { await editPrompt(uid, '❌ Нельзя донатить себе. / Cannot donate to yourself.', mainMenu(uid)); userState.delete(uid); return; }
     if (!users.has(target)) { await editPrompt(uid, '❌ Пользователь не найден. / User not found.', mainMenu(uid)); userState.delete(uid); return; }
     if (isBanned(target)) { await editPrompt(uid, '❌ Этот пользователь забанен. / User is banned.', mainMenu(uid)); userState.delete(uid); return; }
-    userState.set(uid, { ...state, mode: 'donate_amount', target, promptMsgId: state.promptMsgId, chatId: state.chatId });
+    setUserState(uid, { ...state, mode: 'donate_amount', target, promptMsgId: state.promptMsgId, chatId: state.chatId });
     await editPrompt(uid, '💰 Сколько монет донатить? / How many coins to donate?', backKeyboard(uid));
     return;
   }
@@ -2280,16 +2297,13 @@ httpServer.listen(HTTP_PORT, () => {
   console.log('🌐 HTTP ping server listening on port ' + HTTP_PORT);
 });
 
-// --- Авто-пинг: сервисное сообщение только главному админу (keep-alive для Render) ---
+// --- Keep-alive для Render: только внутренний таймер, БЕЗ сообщений админу.
+// Раньше каждые 4 минуты отправлялось сообщение в чат — это был спам и лишние
+// запросы к Telegram API. Render не засыпает, пока идёт long-polling getUpdates.
 const BOT_START_TIME = Date.now();
-setInterval(async () => {
-  try {
-    const uptimeMin = Math.floor((Date.now() - BOT_START_TIME) / 1000 / 60);
-    await bot.telegram.sendMessage(Number(MAIN_ADMIN), `🔄 Автопинг системы (keep-alive)\n⏱ Работает уже: ${uptimeMin} мин\n👥 Пользователей: ${users.size}`, Markup.inlineKeyboard([[Markup.button.callback('🔄 Обновить данные', 'admin_panel')]]));
-    console.log('🔄 Автопинг отправлен (keep-alive)');
-  } catch (e) {
-    logError('Ошибка автопинга: ' + (e && e.stack ? e.stack : String(e)));
-  }
+setInterval(() => {
+  const uptimeMin = Math.floor((Date.now() - BOT_START_TIME) / 1000 / 60);
+  console.log(`💓 keep-alive: uptime ${uptimeMin} мин, users ${users.size}`);
 }, 4 * 60 * 1000);
 
 // --- Сохранение состояния каждые 5 минут (чтобы не потерять данные при перезагрузке) ---
@@ -2439,44 +2453,19 @@ bot.catch((err, ctx) => {
   errorHandlerCalls++;
 
   logError('Telegraf handler error: ' + (err && err.stack ? err.stack : String(err)));
-  
-  // Не пытаемся редактировать сообщения в error handler — это может вызвать рекурсию
-  // Просто логируем ошибку
+
+  // Отвечаем на callback query, чтобы спиннер на кнопке прекратился
+  // (answerCbQuery не создаёт новое сообщение — спам невозможен)
   try {
-    if (ctx && ctx.callbackQuery && ctx.callbackQuery.message) {
-      // Только логируем, не пытаемся редактировать
-      logError('Error in callback query handler, skipping edit to avoid spam');
-    } else if (ctx && ctx.message) {
-      logError('Error in message handler, skipping edit to avoid spam');
+    if (ctx && ctx.callbackQuery) {
+      ctx.answerCbQuery('⚠️ Ошибка, попробуй ещё раз').catch(() => {});
     }
   } catch (e) {}
 });
 
-// Не роняем процесс при uncaughtException — логируем и продолжаем
-process.on('uncaughtException', (err) => {
-  logError('UNCAUGHT EXCEPTION: ' + (err && err.stack ? err.stack : String(err)));
-  // Не выходим — пусть бот продолжит работу
-});
-
-// Не роняем процесс при unhandledRejection
-process.on('unhandledRejection', (reason) => {
-  logError('UNHANDLED REJECTION: ' + (reason && reason.stack ? reason.stack : String(reason)));
-});
-
-// Корректная остановка
-process.on('SIGINT', () => {
-  logError('SIGINT received, stopping bot...');
-  try { saveState(); } catch (e) {}
-  try { bot.stop('SIGINT'); } catch (e) {}
-  process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-  logError('SIGTERM received, stopping bot...');
-  try { saveState(); } catch (e) {}
-  try { bot.stop('SIGTERM'); } catch (e) {}
-  process.exit(0);
-});
+// uncaughtException/unhandledRejection/SIGINT/SIGTERM зарегистрированы
+// в начале файла (с notifyAdmin) и в конце (с pollingActive=false) —
+// дубликаты удалены, чтобы не было двойных обработчиков
 
 // === ЗАПУСК БОТА С ПОЛНОЙ ЗАЩИТОЙ ОТ ВСЕХ ОШИБОК ===
 
@@ -2534,123 +2523,98 @@ function cancelRestart() {
   if (restartTimeout) {
     clearTimeout(restartTimeout);
     restartTimeout = null;
-  }
-}
-
-async function ensureBotInfo() {
-  try {
-    const me = await bot.telegram.getMe();
-    BOT_USERNAME = me.username;
-    console.log('🤖 Бот: @' + BOT_USERNAME);
-  } catch (e) {
-    console.error('Не удалось получить информацию о боте: ' + (e && e.message ? e.message : String(e)));
-  }
+   }
 }
 
 // Кастомный polling loop с полной защитой от ошибок (ручное управление polling через Telegraf API)
 async function runPollingLoop() {
   let consecutiveErrors = 0;
-  const MAX_CONSECUTIVE_ERRORS = 50;
+  const MAX_CONSECUTIVE_ERRORS = 20;
   let last409Time = 0;
   const MIN_409_INTERVAL = 30000; // Минимум 30 сек между 409
-  
+
   // Защита от дубликатов обновлений
   const processedUpdates = new Set();
   const MAX_PROCESSED_SIZE = 10000;
-  
+
   // Используем глобальную переменную для контроля polling
   pollingActive = true;
   let offset = 0;
+  let last409Notify = 0;
+
+  logError('🔄 Запуск ручного polling...');
   
   while (pollingActive) {
+    // Одна итерация = один getUpdates. Никаких вложенных try/catch и
+    // никаких обращений к переменным, объявленным внутри try.
+    let updates = [];
+
     try {
-      logError('🔄 Запуск ручного polling...');
-      
-      // Используем getUpdates напрямую для полного контроля
-      while (pollingActive) {
-        try {
-          const updates = await bot.telegram.getUpdates({
-            offset: offset,
-            limit: 100,
-            timeout: 30,
-            allowed_updates: ['message', 'callback_query', 'pre_checkout_query', 'successful_payment']
-          });
-          
-          if (updates && updates.length > 0) {
-            // Обновляем offset
-            offset = updates[updates.length - 1].update_id + 1;
-            
-            // Обрабатываем обновления с защитой от дубликатов
-            for (const update of updates) {
-              // Проверка на дубликат
-              if (processedUpdates.has(update.update_id)) {
-                logError(`⚠️ Дубликат обновления пропущен: ${update.update_id}`);
-                continue;
-              }
-              processedUpdates.add(update.update_id);
-              
-              // Очистка сета если слишком большой
-              if (processedUpdates.size > MAX_PROCESSED_SIZE) {
-                const first = processedUpdates.values().next().value;
-                processedUpdates.delete(first);
-              }
-              
-              try {
-                await bot.handleUpdate(update);
-              } catch (e) {
-                logError('⚠️ Ошибка обработки update: ' + (e && e.stack ? e.stack : String(e)));
-              }
-            }
-          }
-          
-          // Сбрасываем счетчик ошибок при успехе
-          consecutiveErrors = 0;
-          
-        } catch (e) {
-          const msg = e && e.message ? e.message : String(e);
-          
-          if (msg.includes('409') || msg.includes('Conflict') || msg.includes('terminated by other getUpdates')) {
-            const now = Date.now();
-            const timeSinceLast409 = now - last409Time;
-            
-            if (timeSinceLast409 < MIN_409_INTERVAL) {
-              const extraDelay = MIN_409_INTERVAL - timeSinceLast409;
-              logError(`⚠️ 409 Conflict слишком частый (${timeSinceLast409}мс назад). Дополнительная задержка: ${extraDelay}мс`);
-              await new Promise(r => setTimeout(r, extraDelay));
-            }
-            
-            last409Time = Date.now();
-            logError('⚠️ 409 Conflict: другой инстанс бота уже запущен. Ждём 30 сек и пробуем снова...');
-            notifyAdmin('⚠️ <b>409 Conflict</b>\n\nДругой инстанс бота уже запущен. Ждём 30 сек и пробуем снова.', true);
-            await new Promise(r => setTimeout(r, 30000));
-            
-            // Сбрасываем offset при 409
-            offset = 0;
-          } else {
-            const errMsg = '❌ Polling error: ' + (e && e.stack ? e.stack : String(e));
-            logError(errMsg);
-            notifyAdmin(errMsg, true);
-            await new Promise(r => setTimeout(r, 10000));
-          }
-          
-          consecutiveErrors++;
-          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-            logError('⚠️ Слишком много ошибок подряд (' + MAX_CONSECUTIVE_ERRORS + '), ждём 5 минут...');
-            notifyAdmin('⚠️ <b>Слишком много ошибок</b>\n\n' + MAX_CONSECUTIVE_ERRORS + ' ошибок подряд. Ждём 5 минут перед перезапуском.', true);
-            await new Promise(r => setTimeout(r, 300000));
-            consecutiveErrors = 0;
-          } else {
-            await new Promise(r => setTimeout(r, 5000));
-          }
+      updates = await bot.telegram.getUpdates({
+        offset: offset,
+        limit: 100,
+        timeout: 30,
+        allowed_updates: ['message', 'callback_query', 'pre_checkout_query', 'successful_payment']
+      });
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      const is409 = msg.includes('409') || msg.includes('Conflict') || msg.includes('terminated by other getUpdates');
+
+      if (is409) {
+        // Другой инстанс держит getUpdates. offset НЕ сбрасываем — иначе
+        // Telegram заново отдаёт старые апдейты и кнопки "дёргаются".
+        last409Time = Date.now();
+        logError('⚠️ 409 Conflict: другой инстанс бота уже запущен. Ждём 30 сек...');
+        if (Date.now() - last409Notify > 10 * 60 * 1000) {
+          last409Notify = Date.now();
+          notifyAdmin('⚠️ <b>409 Conflict</b>\n\nДругой инстанс бота уже запущен. Ждём и пробуем снова.', true);
+        }
+        await new Promise(r => setTimeout(r, MIN_409_INTERVAL));
+      } else {
+        consecutiveErrors++;
+        const delay = Math.min(2000 * consecutiveErrors, 30000);
+        logError(`❌ Polling error (${consecutiveErrors}): ${msg} — retry через ${delay}мс`);
+        // Уведомляем админа только на 1-й и 20-й ошибке, чтобы не спамить
+        if (consecutiveErrors === 1 || consecutiveErrors === MAX_CONSECUTIVE_ERRORS) {
+          notifyAdmin('❌ <b>Polling error</b>\n\n' + msg, true);
+        }
+        await new Promise(r => setTimeout(r, delay));
+      }
+      continue;
+    }
+
+    // Запрос прошёл успешно
+    consecutiveErrors = 0;
+
+    if (!Array.isArray(updates) || updates.length === 0) continue;
+
+    // Обновляем offset СРАЗУ — даже если обработка упадёт, апдейт не вернётся
+    offset = updates[updates.length - 1].update_id + 1;
+
+    for (const update of updates) {
+      if (!update || typeof update.update_id !== 'number') continue;
+
+      if (processedUpdates.has(update.update_id)) continue;
+      processedUpdates.add(update.update_id);
+
+      // Ограничиваем размер сета дубликатов
+      if (processedUpdates.size > MAX_PROCESSED_SIZE) {
+        let toDelete = 5000;
+        for (const oldId of processedUpdates.values()) {
+          processedUpdates.delete(oldId);
+          if (--toDelete <= 0) break;
         }
       }
-    } catch (e) {
-      const errMsg = '❌ Polling loop fatal error: ' + (e && e.stack ? e.stack : String(e));
-      logError(errMsg);
-      notifyAdmin(errMsg, true);
-      await new Promise(r => setTimeout(r, 10000));
+
+      try {
+        await bot.handleUpdate(update);
+      } catch (e) {
+        logError('⚠️ Ошибка обработки update ' + update.update_id + ': ' + (e && e.stack ? e.stack : String(e)));
+      }
     }
   }
+
+  logError('🛑 Polling loop остановлен');
 }
 
 let startRetries = 0;
@@ -2760,21 +2724,25 @@ startBot().catch((e) => {
   }, 5000);
 });
 
-// Дополнительная защита: если процесс получает сигнал остановки
-process.on('SIGINT', () => {
-  logError('SIGINT received, stopping bot...');
-  notifyAdmin('🛑 <b>Бот остановлен (SIGINT)</b>\n\nПолучен сигнал прерывания. Graceful shutdown...', true);
+// Дополнительная защита: если процесс получает сигнал остановки.
+// ВАЖНО: сначала синхронно сохраняем состояние, потом выходим.
+// notifyAdmin здесь НЕ вызываем — он async и не успеет до process.exit(),
+// а на Render каждый деплой/рестарт шлёт SIGTERM.
+function gracefulShutdown(signal) {
+  logError(signal + ' received, stopping bot...');
   pollingActive = false;
   try { saveState(); } catch (e) {}
   releaseLock();
   process.exit(0);
-});
+}
 
-process.on('SIGTERM', () => {
-  logError('SIGTERM received, stopping bot...');
-  notifyAdmin('🛑 <b>Бот остановлен (SIGTERM)</b>\n\nПолучен сигнал завершения. Graceful shutdown...', true);
-  pollingActive = false;
-  try { saveState(); } catch (e) {}
-  releaseLock();
-  process.exit(0);
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+// Не даём процессу упасть молча от необработанных ошибок
+process.on('unhandledRejection', (reason) => {
+  logError('unhandledRejection: ' + (reason && reason.stack ? reason.stack : String(reason)));
+});
+process.on('uncaughtException', (err) => {
+  logError('uncaughtException: ' + (err && err.stack ? err.stack : String(err)));
 });
