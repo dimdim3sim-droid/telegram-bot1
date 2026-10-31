@@ -6,14 +6,26 @@ const http = require('http');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
-  console.error('❌ ОШИБКА: BOT_TOKEN не найден! Установи переменную окружения BOT_TOKEN.');
+  console.error('❌ ОШИБКА: BOT_TOKEN не найден! Установи переменную окружение BOT_TOKEN.');
   process.exit(1);
 }
 const MAIN_ADMIN = '7774448780';
 const COMMISSION = 0.05;
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
+const DATA_BACKUP_FILE = path.join(__dirname, 'data.backup.json');
 const HELPER_LINK = 'https://t.me/helperxaze';
 const FISH_COOLDOWN = 12 * 60 * 60 * 1000;
+
+// ========== ЗАЩИТА: Константы надежности ==========
+const MAX_MEMORY_MB = 400; // Рестарт при превышении памяти
+const HEALTH_CHECK_INTERVAL = 30 * 1000; // Проверка здоровья каждые 30 сек
+const GRACEFUL_SHUTDOWN_TIMEOUT = 10 * 1000; // 10 сек на graceful shutdown
+const TELEGRAM_API_TIMEOUT = 30 * 1000; // Таймаут запросов к Telegram
+const MAX_CONSECUTIVE_ERRORS = 50; // Рестарт polling после стольких ошибок подряд
+const STATE_VALIDATION_INTERVAL = 5 * 60 * 1000; // Валидация состояния каждые 5 мин
+const BACKUP_INTERVAL = 60 * 60 * 1000; // Бэкап данных каждый час
+const LOCK_FILE = path.join(__dirname, '.bot.lock');
+const PID_FILE = path.join(__dirname, 'bot.pid');
 
 const bot = new Telegraf(BOT_TOKEN);
 
@@ -2111,8 +2123,6 @@ let isBotRunning = false;
 let restartTimeout = null;
 let pollingLoop = null;
 
-// Файловый лок для предотвращения множественных экземпляров
-const LOCK_FILE = path.join(__dirname, '.bot.lock');
 async function acquireLock() {
   try {
     // Проверяем, не запущен ли уже бот
@@ -2202,61 +2212,72 @@ async function runPollingLoop() {
 
 let startRetries = 0;
 async function startBot() {
+  // === СЛОЙ 1: Защита от повторного запуска ===
   if (isBotRunning) {
-    console.log('⚠️ Бот уже запущен, пропускаем повторный запуск');
+    logError('⚠️ Бот уже запущен, пропускаем повторный запуск');
+    return;
+  }
+  isBotRunning = true;
+
+  // === СЛОЙ 2: Файловый лок с retry (до 10 попыток) ===
+  let lockAcquired = false;
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    lockAcquired = await acquireLock();
+    if (lockAcquired) break;
+    logError(`⏳ Попытка ${attempt}/10 получить лок... ждём 3 сек`);
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  if (!lockAcquired) {
+    logError('❌ Не удалось получить лок после 10 попыток. Ждём 30 сек и пробуем снова.');
+    isBotRunning = false;
+    setTimeout(startBot, 30000);
     return;
   }
 
-  // Задержка перед запуском для Render auto-deploy (даёт время старому инстансу остановиться)
-  console.log('⏳ Ожидание 10 сек перед запуском (Render auto-deploy protection)...');
+  // === СЛОЙ 3: Задержка перед стартом (даём время старому инстансу умереть при Render auto-deploy) ===
+  logError('⏳ Ожидание 10 сек перед стартом (защита от 409 Conflict при auto-deploy)...');
   await new Promise(r => setTimeout(r, 10000));
 
-  // Пытаемся захватить лок
-  const hasLock = await acquireLock();
-  if (!hasLock) {
-    console.log('🔒 Не удалось захватить лок, ждём 30 сек и пробуем снова...');
-    await new Promise(r => setTimeout(r, 30000));
-    return startBot();
+  // === СЛОЙ 4: Отключение вебхука с drop_pending_updates ===
+  try {
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    logError('🗑 Webhook отключён, pending updates очищены');
+  } catch (e) {
+    logError('⚠️ Не удалось отключить вебхук: ' + (e && e.stack ? e.stack : String(e)));
   }
 
+  // === СЛОЙ 5: Получение информации о боте ===
   try {
     await ensureBotInfo();
   } catch (e) {
-    console.error('Не удалось получить информацию о боте: ' + (e && e.message ? e.message : String(e)));
+    logError('⚠️ Не удалось получить информацию о боте: ' + (e && e.stack ? e.stack : String(e)));
   }
 
+  // === СЛОЙ 5.5: Вторая проверка вебхука после ensureBotInfo ===
   try {
     await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-    console.log('🗑 Webhook отключён');
+    logError('🗑 Вторичная очистка вебхука выполнена');
   } catch (e) {
-    console.error('Не удалось отключить вебхук: ' + (e && e.message ? e.message : String(e)));
+    logError('⚠️ Вторичная очистка вебхука не удалась: ' + (e && e.stack ? e.stack : String(e)));
   }
 
+  // === СЛОЙ 6: Запуск polling с полной защитой ===
   try {
-    isBotRunning = true;
     startRetries = 0;
-    console.log('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
+    logError('🚀 Бот запущен... Главный админ: ' + MAIN_ADMIN);
     logError('Bot launched OK');
     
-    // Запускаем кастомный polling loop
+    // === СЛОЙ 7: Запуск polling с автоматическим перезапуском ===
     await runPollingLoop();
   } catch (e) {
-    isBotRunning = false;
     const msg = e && e.message ? e.message : String(e);
-    console.error('Ошибка в polling loop: ' + msg);
-    
-    // 409 Conflict — другой экземпляр бота. Ждём дольше и пробуем снова
-    const delay = msg.includes('409') ? 30000 : 10000;
-    startRetries++;
-    if (startRetries > 20) {
-      console.error('❌ Слишком много попыток запуска, ждём 5 минут...');
-      startRetries = 0;
-      await new Promise(r => setTimeout(r, 300000));
-    }
-    console.log(`🔄 Перезапуск polling через ${delay / 1000} сек (попытка ${startRetries})`);
-    restartTimeout = setTimeout(startBot, delay);
-  } finally {
+    logError('❌ Bot launch error: ' + (e && e.stack ? e.stack : String(e)));
     releaseLock();
+    isBotRunning = false;
+    startRetries++;
+    const delay = Math.min(startRetries * 5000, 60000);
+    logError(`🔄 Перезапуск через ${delay}мс (попытка ${startRetries})...`);
+    setTimeout(startBot, delay);
   }
 }
 
