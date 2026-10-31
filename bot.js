@@ -2399,17 +2399,35 @@ setInterval(() => {
 
 // === ГЛОБАЛЬНАЯ ЗАЩИТА ОТ ОШИБОК (ДО запуска бота!) ===
 
+// Счётчик ошибок для защиты от спама в error handler
+let errorHandlerCalls = 0;
+const MAX_ERROR_HANDLER_CALLS_PER_MINUTE = 30;
+let lastErrorHandlerReset = Date.now();
+
 // Обработчик ошибок Telegraf — ловит ошибки в любых обработчиках команд/кнопок
 bot.catch((err, ctx) => {
+  // Защита от спама в error handler
+  const now = Date.now();
+  if (now - lastErrorHandlerReset > 60000) {
+    errorHandlerCalls = 0;
+    lastErrorHandlerReset = now;
+  }
+  if (errorHandlerCalls >= MAX_ERROR_HANDLER_CALLS_PER_MINUTE) {
+    return; // Не спамим в error handler
+  }
+  errorHandlerCalls++;
+
   logError('Telegraf handler error: ' + (err && err.stack ? err.stack : String(err)));
+  
+  // Не пытаемся редактировать сообщения в error handler — это может вызвать рекурсию
+  // Просто логируем ошибку
   try {
     if (ctx && ctx.callbackQuery && ctx.callbackQuery.message) {
-      // Для callback query пытаемся отредактировать сообщение
-      ctx.editMessageText('⚠️ Внутренняя ошибка бота. Попробуйте позже. / Internal error.').catch(() => {});
+      // Только логируем, не пытаемся редактировать
+      logError('Error in callback query handler, skipping edit to avoid spam');
     } else if (ctx && ctx.message) {
-      ctx.editMessageText('⚠️ Внутренняя ошибка бота. Попробуйте позже. / Internal error.').catch(() => {});
+      logError('Error in message handler, skipping edit to avoid spam');
     }
-    // НЕ используем reply — он создаёт новые сообщения и спамит
   } catch (e) {}
 });
 
